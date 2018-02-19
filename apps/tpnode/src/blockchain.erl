@@ -197,9 +197,10 @@ handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
 handle_cast({new_block, _BlockPayload,  PID},
-            #{ sync:=SyncPid }=State) when self()=/=PID ->
+            #{ sync:=SyncPid }=State) when SyncPid=/=PID ->
     lager:info("Ignore block from ~p during sync with ~p",[PID,SyncPid]),
     {noreply, State};
+
 
 handle_cast({tpic, Origin, #{null:=<<"pick_block">>,
                              <<"hash">>:=Hash,
@@ -648,7 +649,7 @@ handle_info({inst_sync,ledger}, State) ->
     %sync in progress got ledger
     {noreply, State};
 
-handle_info({inst_sync,done,Log}, #{ldb:=LDB}=State) ->
+handle_info({inst_sync,done,Log}, State) ->
     lager:info("BC Sync done ~p",[Log]),
     lager:notice("Check block's keys"),
     {ok,C}=gen_server:call(ledger, {check, []}),
@@ -658,8 +659,6 @@ handle_info({inst_sync,done,Log}, #{ldb:=LDB}=State) ->
            lager:info("Sync done"),
            lager:notice("Fix settings"),
            CleanState=maps:without([sync,syncblock,syncpeer], State),
-           %self() ! runsync,
-           save_block(LDB, Block, true),
            {noreply, CleanState#{
                        lastblock=>Block,
                        candidates=>#{}
@@ -670,35 +669,8 @@ handle_info({inst_sync,done,Log}, #{ldb:=LDB}=State) ->
            {noreply, State}
     end;
 
-handle_info({b2b_sync, Hash}, #{
-                         sync:=b2b,
-                         syncpeer:=Handler
-                        }=State) ->
-    [{_,R}]=tpiccall(Handler,
-                 #{null=><<"pick_block">>, <<"hash">>=>Hash, <<"rel">>=>next},
-                 [block]
-                ),
-    case maps:is_key(block, R) of
-        false ->
-            lager:error("No block arrived, broken sync ~p",[R]),
-            {noreply, State};
-        true ->
-            #{block:=BinBlock}=R,
-            #{hash:=NewH}=Block=block:unpack(BinBlock),
-            gen_server:cast(self(),{new_block, Block, self()}),
-            case maps:find(child, Block) of
-                {ok, Child} ->
-                    self() ! {b2b_sync, Child},
-                    lager:info("block ~s have child ~s",[blkid(NewH),blkid(Child)]);
-                error ->
-                    self() ! runsync,
-                    lager:info("block ~s no child, sync done?",[blkid(NewH)])
-            end,
-            {noreply, State}
-    end;
-
 handle_info(runsync, #{
-              lastblock:=#{header:=#{height:=MyHeight},hash:=MyLastHash}
+              lastblock:=#{header:=#{height:=MyHeight},hash:=_MyBlock}
              }=State) ->
     %State1=run_sync(State),
     Candidates=lists:reverse(
@@ -726,13 +698,7 @@ handle_info(runsync, #{
             Inst=maps:get(<<"instant">>,Info,false),
             lager:info("Found candidate h=~w my ~w, bb ~s inst ~s",
                        [Height, MyHeight, ByBlock, Inst ]),
-            if(Height==MyHeight) ->
-                  lager:info("Sync done, finish."),
-                  notify_settings(),
-                  {noreply,
-                   maps:without([sync,syncblock,syncpeer], State)
-                  };
-              (Height-MyHeight > 50 andalso Inst) ->
+            if(Height-MyHeight > 20 andalso Inst) ->
                   % try instant sync;
                   gen_server:call(ledger, '_flush'),
                   ledger_sync:run_target(tpic,Handler, ledger, undefined),
@@ -743,7 +709,6 @@ handle_info(runsync, #{
               true ->
                   %try block by block
                   lager:error("RUN sync me please"),
-                  self() ! {b2b_sync, MyLastHash},
                   {noreply, State#{
                               sync=>b2b,
                               syncpeer=>Handler
