@@ -15,20 +15,39 @@ h(Method, [<<"api">>|Path], Req) ->
     h(Method,Path,Req);
 
 h(<<"GET">>, [<<"address">>,Addr], _Req) ->
-    Info=maps:map(
-           fun(_K,V) ->
-                   maps:put(lastblk,
-                            bin2hex:dbin2hex(
-                              maps:get(lastblk,V,<<0,0,0,0,0,0,0,0>>)
-                             ),V)
-           end,gen_server:call(blockchain,{get_addr, Addr},20000)),
+    Ledger=ledger:get([Addr]),
+    case maps:is_key(Addr,Ledger) of
+        false ->
+            {404,
+             #{ result => <<"not_found">>,
+                address=>Addr
+              }
+            };
+        true ->
+            Info=maps:get(Addr,Ledger),
+            InfoL=case maps:is_key(lastblk,Info) of
+                      false ->
+                          #{};
+                      true ->
+                          LastBlk=maps:get(lastblk,Info),
+                          #{preblk=>bin2hex:dbin2hex(LastBlk)}
+                  end,
+            InfoU=case maps:is_key(ublk,Info) of
+                      false ->
+                          InfoL;
+                      true ->
+                          UBlk=maps:get(ublk,Info),
+                          InfoL#{lastblk=>bin2hex:dbin2hex(UBlk)}
+                  end,
+            Info1=maps:merge(maps:remove(ublk,Info),InfoU),
+            {200,
+             #{ result => <<"ok">>,
+                address=>Addr,
+                info=>Info1
+              }
+            }
+    end;
 
-    {200,
-     #{ result => <<"ok">>,
-        address=>Addr,
-        info=>Info
-      }
-    };
 
 h(<<"GET">>, [<<"block">>,BlockId], _Req) ->
     BlockHash0=if(BlockId == <<"last">>) -> last;
@@ -165,7 +184,7 @@ h(<<"POST">>, [<<"test">>,<<"request_fund">>], Req) ->
                                   from=>Adr,
                                   to=>Address,
                                   seq=>Seq+1,
-                                  timestamp=>os:system_time()
+                                  timestamp=>os:system_time(millisecond)
                                  },
                                 lager:info("Sign tx ~p",[Tx]),
                                 NewTx=tx:sign(Tx,address:parsekey(Key)),
@@ -211,7 +230,7 @@ h(<<"POST">>, [<<"register">>], Req) ->
                                   from=>Adr,
                                   to=>Address,
                                   seq=>Seq+1,
-                                  timestamp=>os:system_time()
+                                  timestamp=>os:system_time(millisecond)
                                  },
                                 lager:info("Sign tx ~p",[Tx]),
                                 NewTx=tx:sign(Tx,address:parsekey(Key)),
@@ -284,6 +303,20 @@ prettify_block(#{}=Block0) ->
               bin2hex:dbin2hex(BlockHash);
          (child,BlockHash) ->
               bin2hex:dbin2hex(BlockHash);
+         (bals,Bal) ->
+              maps:map(
+                fun(_K,V) ->
+                       case maps:is_key(lastblk,V) of
+                           false ->
+                               maps:remove(ublk,V);
+                           true ->
+                               LastBlk=maps:get(lastblk,V),
+                               maps:put(lastblk,
+                                        bin2hex:dbin2hex(LastBlk),
+                                        maps:remove(ublk,V)
+                                       )
+                       end
+                end, Bal);
          (header,BlockHeader) ->
               maps:map(
                 fun(parent,V) ->
