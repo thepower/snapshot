@@ -278,11 +278,7 @@ applykv({K0,V},Acc) ->
 
 load(DB) ->
     GB=rocksdb:fold(DB,
-               fun({<<"lb:",_/binary>>,_}, Acc) ->
-                       Acc;
-                  ({<<"lastblk",_/binary>>,_}, Acc) ->
-                       Acc;
-                  ({K,V}, Acc) ->
+               fun({K,V}, Acc) ->
                        applykv({K,binary_to_term(V)},Acc)
                end,
                gb_merkle_trees:from_list([{<<>>,<<>>}]),
@@ -300,7 +296,15 @@ apply_patch(Address,Patch, #{db:=DB}=State) ->
                    Patch;
                {ok, Wallet} ->
                    Element=erlang:binary_to_term(Wallet),
-                   bal:merge(Element,Patch)
+                   P1=maps:merge(
+                        Element,
+                        maps:with([lastblk,seq,t],Patch)
+                       ),
+                   Bals=maps:merge(
+                          maps:get(amount, Element,#{}),
+                          maps:get(amount, Patch,#{})
+                         ),
+                   P1#{amount=>Bals}
            end,
     {NewVal,State}.
 
