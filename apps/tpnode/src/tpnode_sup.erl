@@ -25,14 +25,6 @@ start_link() ->
 init([]) ->
     application:ensure_all_started(cowboy),
     application:ensure_all_started(tinymq),
-    CrossChainOpts = application:get_env(tpnode, crosschain, #{}),
-    CrossChainPort = maps:get(port, CrossChainOpts, 43311),
-    CrossChainMaxClients = maps:get(max_connections, CrossChainOpts, 100),
-    {ok, _} = ranch:start_listener(crosschain,
-        ranch_tcp, [
-            {port, CrossChainPort},
-            {max_connections, CrossChainMaxClients}],
-        crosschain_protocol, []),
     {ok,TPIC0}=application:get_env(tpnode,tpic),
     TPIC=TPIC0#{
            ecdsa=>tpecdsa:generate_priv(),
@@ -57,7 +49,6 @@ init([]) ->
             { tpic_sctp, {tpic_sctp, start_link, [TPIC]}, permanent, 5000, worker, []},
             { ledger, {ledger, start_link, []}, permanent, 5000, worker, []},
             { discovery, {discovery, start_link, [#{pid=>discovery, name=>discovery}]}, permanent, 5000, worker, []},
-            { tpnode_announcer, {tpnode_announcer, start_link, [#{}]}, permanent, 5000, worker, []},
             tpnode_http:childspec()
            ]
          } }.
