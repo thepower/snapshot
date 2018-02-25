@@ -30,7 +30,7 @@ start_link() ->
 init(_Args) ->
     pg2:create(blockchain),
     pg2:join(blockchain,self()),
-    NodeID=nodekey:node_id(),
+    NodeID=tpnode_tools:node_id(),
     filelib:ensure_dir("db/"),
     {ok,LDB}=ldb:open("db/db_"++atom_to_list(node())),
     LastBlockHash=ldb:read_key(LDB,<<"lastblock">>,<<0,0,0,0,0,0,0,0>>),
@@ -637,11 +637,6 @@ handle_cast(_Msg, State) ->
     file:write_file("tmp/unknown_cast_state.txt", io_lib:format("~p.~n", [State])),
     {noreply, State}.
 
-handle_info({inst_sync,settings, Patches}, State) ->
-    %sync almost done - got settings
-    Settings=settings:patch(Patches,settings:new()),
-    {noreply, State#{syncsettings=>Settings}};
-
 handle_info({inst_sync,block, BinBlock}, State) ->
     #{hash:=Hash,header:=#{ledger_hash:=LH,height:=Height}}=Block=block:unpack(BinBlock),
     lager:info("BC Sync Got block ~p ~s~n",[Height,bin2hex:dbin2hex(Hash)]),
@@ -661,12 +656,11 @@ handle_info({inst_sync,done,Log}, #{ldb:=LDB}=State) ->
     #{header:=#{ledger_hash:=LH}}=Block=maps:get(syncblock, State),
     if LH==C ->
            lager:info("Sync done"),
-           lager:notice("Verify settings"),
-           CleanState=maps:without([sync,syncblock,syncpeer,syncsettings], State),
+           lager:notice("Fix settings"),
+           CleanState=maps:without([sync,syncblock,syncpeer], State),
            %self() ! runsync,
            save_block(LDB, Block, true),
            {noreply, CleanState#{
-                       settings=>maps:get(syncsettings,State),
                        lastblock=>Block,
                        candidates=>#{}
                       }
@@ -713,19 +707,17 @@ handle_info(runsync, #{
                           [last_hash,last_height,chain]
                          )),
     case lists:foldl( %first suitable will be the quickest
-                fun({CHandler,#{chain:=_HisChain,
+                fun({Handler,#{chain:=_Ch,
                                last_hash:=_,
                                last_height:=_,
-                               null:=<<"sync_available">>}=CInfo},undefined) ->
-                        {CHandler, CInfo};
-                   ({_,_},undefined) ->
-                        undefined;
-                   ({_,_},{AccH,AccI}) ->
-                        {AccH,AccI}
+                               null:=<<"sync_available">>}=Info},undefined) ->
+                        {Handler, Info};
+                   ({_Handler,_Info},{H,I}) ->
+                        {H,I}
                 end, undefined, Candidates) of
         undefined ->
             lager:notice("No candidates for sync."),
-            {noreply, maps:without([sync,syncblock,syncpeer], State)};
+            {noreply, State};
         {Handler, #{chain:=_Ch,
                      last_hash:=_,
                      last_height:=Height,
@@ -996,7 +988,9 @@ notify_settings() ->
 mychain(#{settings:=S}=State) ->
     KeyDB=maps:get(keys,S,#{}),
     NodeChain=maps:get(nodechain,S,#{}),
-    PubKey=nodekey:get_pub(),
+    {ok,K1}=application:get_env(tpnode,privkey),
+    PrivKey=hex:parse(K1),
+    PubKey=tpecdsa:secp256k1_ec_pubkey_create(PrivKey, true),
     lager:info("My key ~s",[bin2hex:dbin2hex(PubKey)]),
     MyName=maps:fold(
              fun(K,V,undefined) ->
