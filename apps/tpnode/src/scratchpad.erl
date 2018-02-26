@@ -3,10 +3,12 @@
 -compile(nowarn_export_all).
 
 node_id() ->
-    nodekey:node_id().
+    {ok,K1}=application:get_env(tpnode,privkey),
+    address:pub2addr(node,tpecdsa:secp256k1_ec_pubkey_create(hex:parse(K1), true)).
 
 sign(Message) ->
-    PKey=nodekey:get_priv(),
+    {ok,PKeyH}=application:get_env(tpnode,privkey),
+    PKey=hex:parse(PKeyH),
     Msg32 = crypto:hash(sha256, Message),
     Sig = tpecdsa:secp256k1_ecdsa_sign(Msg32, PKey, default, <<>>),
     Pub=tpecdsa:secp256k1_ec_pubkey_create(PKey, true),
@@ -24,40 +26,24 @@ verify(<<Public:33/binary,Sig:71/binary,Message/binary>>) ->
     {Found,tpecdsa:secp256k1_ecdsa_verify(Msg32, Sig, Public)}.
 
 
-gentx(BFrom,BTo,Amount,HPrivKey) when is_binary(BFrom)->
-    From=lists:filter(
-           fun(A) when A>=$0 andalso $9>=A -> true;
-              (A) when A>=$a andalso $z>=A -> true;
-              (A) when A>=$A andalso $Z>=A -> true;
-              (_) -> false
-           end,binary_to_list(BFrom)),
-    To=re:replace(binary_to_list(BTo),<<" ">>,"",[global,{return,binary}]),
-    lager:info("From ~p to ~p",[From,To]),
+gentx(BFrom,To,Amount,HPrivKey) when is_binary(BFrom)->
+    From=binary_to_list(BFrom),
     Cur= <<"FTT">>,
     inets:start(),
-    C=try
-          {ok,{{_HTTP11,200,_OK},_Headers,Body}}=
-          httpc:request(get,{"http://127.0.0.1:43280/api/address/"++From,[]},[],[{body_format,binary}]),
-          #{<<"info">>:=C1}=jsx:decode(Body,[return_maps]),
-          C1
-      catch _:_ ->
-                #{
-              <<"amount">> => #{},
-              <<"seq">> => 0
-             }
-      end,
+    {ok,{{_HTTP11,200,_OK},_Headers,Body}}=
+    httpc:request(get,{"http://127.0.0.1:43280/api/address/"++From,[]},[],[{body_format,binary}]),
+    #{<<"info">>:=C}=jsx:decode(Body,[return_maps]),
     #{<<"seq">>:=Seq}=maps:get(Cur,C,#{<<"amount">> => 0,<<"seq">> => 0}),
-
     Tx=#{
       amount=>Amount,
       cur=>Cur,
       extradata=>jsx:encode(#{
                    message=><<"preved from gentx">>
                   }),
-      from=>list_to_binary(From),
+      from=>BFrom,
       to=>To,
       seq=>Seq+1,
-      timestamp=>os:system_time(millisecond)
+      timestamp=>os:system_time()
      },
     io:format("TX1 ~p.~n",[Tx]),
     NewTx=tx:sign(Tx,address:parsekey(HPrivKey)),
@@ -71,51 +57,15 @@ gentx(BFrom,BTo,Amount,HPrivKey) when is_binary(BFrom)->
                   [],[{body_format,binary}])
     }.
 
-reapply_settings() ->
-    PrivKey=nodekey:get_priv(),
-    Patch=settings:sign(
-            settings:get_patches(gen_server:call(blockchain,settings)),
-            PrivKey),
-    io:format("PK ~p~n",[settings:verify(Patch)]),
-    {Patch,
-     gen_server:call(txpool, {patch, Patch})}.
-
-
-test_alloc_addr() ->
-    TestPriv=address:parsekey(<<"5KHwT1rGjWiNzoZeFuDT85tZ6KTTZThd4xPfaKWRUKNqvGQQtqK">>),
-    PubKey=tpecdsa:calc_pub(TestPriv,true),
-    TX0=tx:unpack( tx:pack( #{ type=>register, register=>PubKey })),
-    {TX0,
-    gen_server:call(txpool, {register, TX0})
-    }.
-
-
-test_alloc_block() ->
-    PrivKey=nodekey:get_priv(),
-    Patch=settings:sign(
-            settings:dmp(
-              settings:mp(
-                [
-                 #{t=><<"nonexist">>,p=>[current,allocblock,last], v=>any},
-                 #{t=>set,p=>[current,allocblock,group], v=>10},
-                 #{t=>set,p=>[current,allocblock,block], v=>0},
-                 #{t=>set,p=>[current,allocblock,last], v=>3}
-                ])),
-      PrivKey),
-    io:format("PK ~p~n",[settings:verify(Patch)]),
-    {Patch,
-    gen_server:call(txpool, {patch, Patch})
-    }.
-
-
 test_sign_patch() ->
-    PrivKey=nodekey:get_priv(),
+    {ok,HexPrivKey}=application:get_env(tpnode,privkey),
+    PrivKey=hex:parse(HexPrivKey),
     Patch=settings:sign(
             settings:dmp(
               settings:mp(
                 [
                  %       #{t=>set,p=>[globals,patchsigs], v=>2},
-                 #{t=>set,p=>[chain,0,blocktime], v=>10},
+                 #{t=>set,p=>[chain,0,blocktime], v=>1},
                  #{t=>set,p=>[chain,0,allowempty], v=>0}
                  %       #{t=>list_add,p=>[chains], v=>1},
                  %       #{t=>set,p=>[chain,1,minsig], v=>1},
@@ -148,7 +98,7 @@ outbound_tx() ->
                   }),
       from=>From,
       to=>To,
-      timestamp=>os:system_time(millisecond)
+      timestamp=>os:system_time()
      },
     NewTx=tx:sign(Tx,Pvt),
     %tx:unpack(NewTx).
@@ -199,15 +149,17 @@ calc_pub(Priv) ->
 
 
 sign1(Message) ->
-    PrivKey=nodekey:get_priv(),
-    Sig = tpecdsa:secp256k1_ecdsa_sign(Message, PrivKey, default, <<>>),
-    Pub=tpecdsa:secp256k1_ec_pubkey_create(PrivKey, true),
+    {ok,PKeyH}=application:get_env(tpnode,privkey),
+    PKey=hex:parse(PKeyH),
+    Sig = tpecdsa:secp256k1_ecdsa_sign(Message, PKey, default, <<>>),
+    Pub=tpecdsa:secp256k1_ec_pubkey_create(PKey, true),
     <<(size(Pub)):8/integer,(size(Sig)):8/integer,Pub/binary,Sig/binary,Message/binary>>.
 
 sign2(Message) ->
-    PrivKey=nodekey:get_priv(),
-    Sig = crypto:sign(ecdsa, sha256, Message, [PrivKey, crypto:ec_curve(secp256k1)]),
-    {Pub,PrivKey}=crypto:generate_key(ecdh, crypto:ec_curve(secp256k1), PrivKey),
+    {ok,PKeyH}=application:get_env(tpnode,privkey),
+    PKey=hex:parse(PKeyH),
+    Sig = crypto:sign(ecdsa, sha256, Message, [PKey, crypto:ec_curve(secp256k1)]),
+    {Pub,PKey}=crypto:generate_key(ecdh, crypto:ec_curve(secp256k1), PKey),
     <<(size(Pub)):8/integer,(size(Sig)):8/integer,Pub/binary,Sig/binary,Message/binary>>.
 
 check(<<PubLen:8/integer,SigLen:8/integer,Rest/binary>>) ->

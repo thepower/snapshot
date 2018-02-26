@@ -25,7 +25,7 @@ start_link() ->
 init([]) ->
     application:ensure_all_started(cowboy),
     application:ensure_all_started(tinymq),
-    tpnode:reload(),
+
     {ok,TPIC0}=application:get_env(tpnode,tpic),
     TPIC=TPIC0#{
            ecdsa=>tpecdsa:generate_priv(),
@@ -51,7 +51,10 @@ init([]) ->
             { ledger, {ledger, start_link, []}, permanent, 5000, worker, []},
             { discovery, {discovery, start_link, [#{pid=>discovery, name=>discovery}]}, permanent, 5000, worker, []},
             { tpnode_announcer, {tpnode_announcer, start_link, [#{}]}, permanent, 5000, worker, []},
-            tpnode_http:childspec()
+            { crosschain, {crosschain, start_link, [#{}]}, permanent, 5000, worker, []},
+            { xchain_dispatcher, {xchain_dispatcher, start_link, []}, permanent, 5000, worker, []},
+            tpnode_http:childspec(),
+            xchain_ws_handler:childspec()
            ]
          } }.
 

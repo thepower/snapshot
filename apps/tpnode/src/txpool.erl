@@ -36,7 +36,7 @@ start_link() ->
 init(_Args) ->
     {ok, #{
        queue=>queue:new(),
-       nodeid=>nodekey:node_id(),
+       nodeid=>tpnode_tools:node_id(),
        inprocess=>hashqueue:new()
       }}.
 
@@ -69,18 +69,6 @@ handle_call({portout, #{
                         },Queue)
       }
     };
-
-handle_call({register, #{
-               register:=_
-              }=Patch}, _From, #{nodeid:=Node,queue:=Queue}=State) ->
-    TxID=generate_txid(Node),
-    {reply,
-     {ok, TxID},
-     State#{
-       queue=>queue:in({TxID, Patch},Queue)
-      }
-    };
-
 
 handle_call({patch, #{
                patch:=_,
@@ -115,10 +103,7 @@ handle_call({new_tx, BinTx}, _From, #{nodeid:=Node,queue:=Queue}=State) ->
         end
     catch Ec:Ee ->
               Stack=erlang:get_stacktrace(),
-              lists:foreach(
-                fun(Where) ->
-                        lager:info("error at ~p",[Where])
-                end, Stack),
+              lager:info("error at ~p",[hd(Stack)]),
               {reply, {error, {Ec,Ee}}, State}
     end;
 
