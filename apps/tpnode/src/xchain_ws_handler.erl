@@ -15,6 +15,7 @@ init(Req, Opts) ->
     }}.
 
 websocket_init(State) ->
+%%    erlang:start_timer(1000, self(), <<"Hello!">>),
     {ok, State}.
 
 websocket_handle({binary, Bin}, State) ->
@@ -31,14 +32,9 @@ websocket_handle({binary, Bin}, State) ->
 
         end
     catch
-        Ec:Ee ->
-            S = erlang:get_stacktrace(),
-            lager:error("WS server error parse error ~p:~p ~p", [Ec, Ee, Bin]),
-            lists:foreach(
-                fun(Se) ->
-                    lager:error("at ~p", [Se])
-                end, S),
-            {ok, State}
+        Err:Reason ->
+        lager:error("WS server error ~p ~p ~p",[Err, Reason, Bin]),
+        {ok, State}
     end;
 
 websocket_handle({text, <<"ping">>}, State) ->
@@ -58,11 +54,14 @@ websocket_info({message, Msg}, State) ->
 
 websocket_info({timeout, _Ref, Msg}, State) ->
     lager:notice("crosschain ws timeout ~p", [Msg]),
+%%    erlang:start_timer(1000, self(), <<"How' you doin'?">>),
     {reply, {text, Msg}, State};
 
 websocket_info(_Info, State) ->
     lager:notice("Unknown info ~p", [_Info]),
     {ok, State}.
+
+
 
 
 %% ----------------------------
@@ -91,11 +90,6 @@ childspec() ->
 
 
 %% ----------------------------
-
-handle_xchain(ping) ->
-%%    lager:notice("got ping"),
-    ok;
-
 
 handle_xchain(chain) ->
     try
