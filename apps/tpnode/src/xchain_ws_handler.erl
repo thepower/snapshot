@@ -19,9 +19,9 @@ websocket_init(State) ->
 
 websocket_handle({binary, Bin}, State) ->
     try
-        lager:debug("ws server got binary msg: ~p", [Bin]),
+        lager:notice("ws server got binary msg: ~p", [Bin]),
         Cmd = crosschain:unpack(Bin),
-        lager:debug("ws server unpacked term: ~p", [Cmd]),
+        lager:notice("ws server unpacked term: ~p", [Cmd]),
         Result = handle_xchain(Cmd),
         case Result of
             ok ->
@@ -45,23 +45,23 @@ websocket_handle({text, <<"ping">>}, State) ->
     {ok, State};
 
 websocket_handle({text, Msg}, State) ->
-    lager:debug("ws server got msg: ~p", [Msg]),
+    lager:notice("ws server got msg: ~p", [Msg]),
     {reply, {text, <<"pong: ", Msg/binary >>}, State};
 
 websocket_handle(_Data, State) ->
-    lager:info("Unknown websocket ~p", [_Data]),
+    lager:notice("Unknown websocket ~p", [_Data]),
     {ok, State}.
 
 websocket_info({message, Msg}, State) ->
-    lager:debug("send message ~p",[Msg]),
+    lager:info("send message ~p",[Msg]),
     {reply, {binary, crosschain:pack(Msg)}, State};
 
 websocket_info({timeout, _Ref, Msg}, State) ->
-    lager:debug("crosschain ws timeout ~p", [Msg]),
+    lager:notice("crosschain ws timeout ~p", [Msg]),
     {reply, {text, Msg}, State};
 
 websocket_info(_Info, State) ->
-    lager:ingo("Unknown info ~p", [_Info]),
+    lager:notice("Unknown info ~p", [_Info]),
     {ok, State}.
 
 
