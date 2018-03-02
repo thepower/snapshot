@@ -19,9 +19,9 @@ websocket_init(State) ->
 
 websocket_handle({binary, Bin}, State) ->
     try
-%%        lager:debug("ws server got binary msg: ~p", [Bin]),
+        lager:debug("ws server got binary msg: ~p", [Bin]),
         Cmd = crosschain:unpack(Bin),
-        lager:debug("ws server got term: ~p", [Cmd]),
+        lager:debug("ws server unpacked term: ~p", [Cmd]),
         Result = handle_xchain(Cmd),
         case Result of
             ok ->
@@ -57,11 +57,11 @@ websocket_info({message, Msg}, State) ->
     {reply, {binary, crosschain:pack(Msg)}, State};
 
 websocket_info({timeout, _Ref, Msg}, State) ->
-    lager:notice("crosschain ws timeout ~p", [Msg]),
+    lager:debug("crosschain ws timeout ~p", [Msg]),
     {reply, {text, Msg}, State};
 
 websocket_info(_Info, State) ->
-    lager:notice("Unknown info ~p", [_Info]),
+    lager:ingo("Unknown info ~p", [_Info]),
     {ok, State}.
 
 
@@ -71,9 +71,7 @@ childspec() ->
     HTTPDispatch = cowboy_router:compile(
         [
             {'_', [
-                {"/xchain/ws", xchain_ws_handler, []},
-                {"/", xchain_ws_handler, []},
-                {"/xchain/api/[...]", apixiom, {xchain_api,#{}}}
+                {"/", xchain_ws_handler, []}
             ]}
         ]),
     CrossChainOpts = application:get_env(tpnode, crosschain, #{}),
@@ -84,21 +82,12 @@ childspec() ->
     HTTPConnType=#{connection_type => supervisor,
         env => #{dispatch => HTTPDispatch}},
     HTTPAcceptors=10,
-    [
-        ranch:child_spec(crosschain_api,
-            HTTPAcceptors,
-            ranch_tcp,
-            HTTPOpts,
-            cowboy_clear,
-            HTTPConnType),
-
-        ranch:child_spec(crosschain_api6,
-            HTTPAcceptors,
-            ranch_tcp,
-            [inet6,{ipv6_v6only,true}|HTTPOpts],
-            cowboy_clear,
-            HTTPConnType)
-    ].
+    ranch:child_spec(crosschain_api,
+        HTTPAcceptors,
+        ranch_tcp,
+        HTTPOpts,
+        cowboy_clear,
+        HTTPConnType).
 
 
 %% ----------------------------
