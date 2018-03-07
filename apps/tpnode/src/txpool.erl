@@ -54,8 +54,8 @@ handle_call({portout, #{
             }, _From, #{nodeid:=Node,queue:=Queue}=State) ->
     lager:notice("TODO: Check keys"),
     TxID=generate_txid(Node),
-    {reply,
-     {ok, TxID},
+    {reply, 
+     {ok, TxID}, 
      State#{
        queue=>queue:in({TxID,
                         #{
@@ -89,8 +89,8 @@ handle_call({patch, #{
     case settings:verify(Patch) of
         {ok, #{ sigverify:=#{valid:=[_|_]} }} ->
             TxID=generate_txid(Node),
-            {reply,
-             {ok, TxID},
+            {reply, 
+             {ok, TxID}, 
              State#{
                queue=>queue:in({TxID, Patch},Queue)
               }
@@ -105,7 +105,7 @@ handle_call({patch, #{
 handle_call({new_tx, BinTx}, _From, #{nodeid:=Node,queue:=Queue}=State) ->
     try
         case tx:verify(BinTx) of
-            {ok, Tx} ->
+            {ok, Tx} -> 
                 TxID=generate_txid(Node),
                 {reply, {ok, TxID}, State#{
                                       queue=>queue:in({TxID,Tx},Queue)
@@ -161,15 +161,15 @@ handle_cast(prepare, #{mychain:=MyChain,inprocess:=InProc0,queue:=Queue,nodeid:=
               S=erlang:get_stacktrace(),
               lager:error("Can't encode at ~p",[S])
     end,
-
+    
     %lists:foreach(
-    %  fun(Pid)->
+    %  fun(Pid)-> 
     %          %lager:info("Prepare to ~p",[Pid]),
-    %          gen_server:cast(Pid, {prepare, Node, Res})
-    %  end,
+    %          gen_server:cast(Pid, {prepare, Node, Res}) 
+    %  end, 
     %  pg2:get_members({mkblock,MyChain})
     % ),
-    gen_server:cast(mkblock, {prepare, Node, Res}),
+    gen_server:cast(mkblock, {prepare, Node, Res}), 
     Time=erlang:system_time(seconds),
     {InProc1,Queue2}=recovery_lost(InProc0,Queue1,Time),
     ETime=Time+20,
@@ -183,7 +183,7 @@ handle_cast(prepare, #{mychain:=MyChain,inprocess:=InProc0,queue:=Queue,nodeid:=
                              Res
                             )
                }
-    };
+    }; 
 
 handle_cast(prepare, State) ->
     lager:notice("TXPOOL Blocktime, but I not ready"),
@@ -191,37 +191,29 @@ handle_cast(prepare, State) ->
 
 handle_cast({done, Txs}, #{inprocess:=InProc0}=State) ->
     InProc1=lists:foldl(
-      fun({Tx,_},Acc) ->
+      fun(Tx,Acc) ->
               lager:info("TX pool tx done ~p",[Tx]),
-              hashqueue:remove(Tx,Acc);
-		 (Tx,Acc) ->
-			  lager:info("TX pool tx done ~p",[Tx]),
               hashqueue:remove(Tx,Acc)
-      end,
+      end, 
       InProc0,
       Txs),
-	gen_server:cast(tpnode_ws_dispatcher,{done, true, Txs}),
     {noreply, State#{
                 inprocess=>InProc1
                }
     };
 
 handle_cast({failed, Txs}, #{inprocess:=InProc0}=State) ->
-	InProc1=lists:foldl(
-			  fun({_,{overdue,Parent}}, Acc) ->
-					  lager:info("TX pool inbound block overdue ~p",[Parent]),
-					  hashqueue:remove(Parent,Acc);
-				 ({TxID,Reason},Acc) ->
-					  lager:info("TX pool tx failed ~p ~p",[TxID,Reason]),
-					  hashqueue:remove(TxID,Acc)
-			  end,
-			  InProc0,
-			  Txs),
-	gen_server:cast(tpnode_ws_dispatcher,{done, false, Txs}),
-	{noreply, State#{
-				inprocess=>InProc1
-			   }
-	};
+    InProc1=lists:foldl(
+              fun({TxID,Reason},Acc) ->
+                      lager:info("TX pool tx failed ~p ~p",[TxID,Reason]),
+                      hashqueue:remove(TxID,Acc)
+              end, 
+              InProc0,
+              Txs),
+    {noreply, State#{
+                inprocess=>InProc1
+               }
+    };
 
 
 handle_cast(_Msg, State) ->
@@ -245,13 +237,13 @@ generate_txid(Node) ->
     Timestamp=bin2hex:dbin2hex(binary:encode_unsigned(os:system_time())),
     Number=bin2hex:dbin2hex(binary:encode_unsigned(erlang:unique_integer([positive]))),
     iolist_to_binary([Timestamp,"-",Node,"-",Number]).
-
+    
 pullx(0,Q,Acc) ->
     {Q,Acc};
 
 pullx(N,Q,Acc) ->
     {Element,Q1}=queue:out(Q),
-    case Element of
+    case Element of 
         {value, E1} ->
             lager:info("Pull tx ~p",[E1]),
            pullx(N-1, Q1, [E1|Acc]);

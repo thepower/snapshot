@@ -25,7 +25,6 @@ start_link() ->
 init([]) ->
     application:ensure_all_started(cowboy),
     application:ensure_all_started(tinymq),
-	code:ensure_loaded(tpic_checkauth),
     tpnode:reload(),
 
     {ok,TPIC0}=application:get_env(tpnode,tpic),
@@ -54,9 +53,8 @@ init([]) ->
             { discovery, {discovery, start_link, [#{pid=>discovery, name=>discovery}]}, permanent, 5000, worker, []},
             { tpnode_announcer, {tpnode_announcer, start_link, [#{}]}, permanent, 5000, worker, []},
             { crosschain, {crosschain, start_link, [#{}]}, permanent, 5000, worker, []},
-            { xchain_dispatcher, {xchain_dispatcher, start_link, []}, permanent, 5000, worker, []}
-           ]
-            ++ xchain_ws_handler:childspec()
-            ++ tpnode_http:childspec()
+            { xchain_dispatcher, {xchain_dispatcher, start_link, []}, permanent, 5000, worker, []},
+            xchain_ws_handler:childspec()
+           ] ++ tpnode_http:childspec()
          } }.
 

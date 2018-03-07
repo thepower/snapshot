@@ -19,9 +19,9 @@ websocket_init(State) ->
 
 websocket_handle({binary, Bin}, State) ->
     try
-%%        lager:debug("ws server got binary msg: ~p", [Bin]),
+        lager:notice("ws server got binary msg: ~p", [Bin]),
         Cmd = crosschain:unpack(Bin),
-        lager:debug("ws server got term: ~p", [Cmd]),
+        lager:notice("ws server unpacked term: ~p", [Cmd]),
         Result = handle_xchain(Cmd),
         case Result of
             ok ->
@@ -45,19 +45,19 @@ websocket_handle({text, <<"ping">>}, State) ->
     {ok, State};
 
 websocket_handle({text, Msg}, State) ->
-    lager:debug("ws server got msg: ~p", [Msg]),
+    lager:notice("ws server got msg: ~p", [Msg]),
     {reply, {text, <<"pong: ", Msg/binary >>}, State};
 
 websocket_handle(_Data, State) ->
-    lager:info("Unknown websocket ~p", [_Data]),
+    lager:notice("Unknown websocket ~p", [_Data]),
     {ok, State}.
 
 websocket_info({message, Msg}, State) ->
-    lager:debug("send message ~p",[Msg]),
+    lager:info("send message ~p",[Msg]),
     {reply, {binary, crosschain:pack(Msg)}, State};
 
 websocket_info({timeout, _Ref, Msg}, State) ->
-    lager:debug("crosschain ws timeout ~p", [Msg]),
+    lager:notice("crosschain ws timeout ~p", [Msg]),
     {reply, {text, Msg}, State};
 
 websocket_info(_Info, State) ->
@@ -71,9 +71,7 @@ childspec() ->
     HTTPDispatch = cowboy_router:compile(
         [
             {'_', [
-                {"/xchain/ws", xchain_ws_handler, []},
-                {"/", xchain_ws_handler, []},
-                {"/xchain/api/[...]", apixiom, {xchain_api,#{}}}
+                {"/", xchain_ws_handler, []}
             ]}
         ]),
     CrossChainOpts = application:get_env(tpnode, crosschain, #{}),
@@ -84,21 +82,12 @@ childspec() ->
     HTTPConnType=#{connection_type => supervisor,
         env => #{dispatch => HTTPDispatch}},
     HTTPAcceptors=10,
-    [
-        ranch:child_spec(crosschain_api,
-            HTTPAcceptors,
-            ranch_tcp,
-            HTTPOpts,
-            cowboy_clear,
-            HTTPConnType),
-
-        ranch:child_spec(crosschain_api6,
-            HTTPAcceptors,
-            ranch_tcp,
-            [inet6,{ipv6_v6only,true}|HTTPOpts],
-            cowboy_clear,
-            HTTPConnType)
-    ].
+    ranch:child_spec(crosschain_api,
+        HTTPAcceptors,
+        ranch_tcp,
+        HTTPOpts,
+        cowboy_clear,
+        HTTPConnType).
 
 
 %% ----------------------------
@@ -108,27 +97,19 @@ handle_xchain(ping) ->
     ok;
 
 
-handle_xchain({node_id, RemoteNodeId, RemoteChannels}) ->
-    try
-        gen_server:cast(xchain_dispatcher, {register_peer, self(), RemoteNodeId, RemoteChannels}),
-        {iam, nodekey:node_id()}
-    catch _:_ ->
-        error
-    end;
-
 handle_xchain(chain) ->
     try
-        {ok, blockchain:chain()}
-    catch _:_ ->
-        error
+        {ok,blockchain:chain()}
+    catch _:_ -> 
+              error
     end;
 
 handle_xchain(height) ->
     try
-        {_, H} = gen_server:call(blockchain, last_block_height),
+        {_,H}=gen_server:call(blockchain,last_block_height),
         {ok, H}
     catch _:_ ->
-        error
+              error
     end;
 
 handle_xchain({subscribe, Channel}) ->

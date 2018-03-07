@@ -1,6 +1,6 @@
 -module(tpnode_httpapi).
 
--export([h/3,after_filter/1,prettify_block/2,prettify_block/1]).
+-export([h/3,after_filter/1,prettify_block/1]).
 
 after_filter(Req) ->
     Origin=cowboy_req:header(<<"origin">>,Req,<<"*">>),
@@ -14,45 +14,6 @@ h(Method, [<<"api">>|Path], Req) ->
     lager:info("Path ~p",[Path]),
     h(Method,Path,Req);
 
-h(<<"GET">>, [<<"node">>,<<"status">>], _Req) ->
-    {Chain, Hash, Header1} = gen_server:call(blockchain, status),
-	QS=cowboy_req:parse_qs(_Req),
-	BinPacker=case proplists:get_value(<<"bin">>,QS) of
-				  <<"b64">> -> fun(Bin) -> base64:encode(Bin) end;
-				  <<"hex">> -> fun(Bin) -> bin2hex:dbin2hex(Bin) end;
-				  <<"raw">> -> fun(Bin) -> Bin end;
-				  _ -> fun(Bin) -> base64:encode(Bin) end
-			  end,
-    Header=maps:map(
-             fun(_,V) when is_binary(V) -> BinPacker(V);
-                (_,V) -> V
-             end, Header1),
-    Peers=lists:map(
-            fun(#{addr:=_Addr, auth:=Auth, state:=Sta}) ->
-                    #{auth=>Auth,
-                      state=>Sta
-                     }
-            end, tpic:peers()),
-    SynPeers=gen_server:call(synchronizer,peers),
-    {Ver,_BuildTime}=tpnode:ver(),
-    {200,
-     #{ result => <<"ok">>,
-        status => #{
-          nodeid=>nodekey:node_id(),
-          public_key=>BinPacker(nodekey:get_pub()),
-		  blockchain=>#{
-			chain=>Chain,
-			hash=>BinPacker(Hash),
-			header=>Header
-		   },
-		  xchain_inbound => gen_server:call(xchain_dispatcher,peers),
-		  xchain_outbound => gen_server:call(crosschain,peers),
-          tpic_peers=>Peers,
-          sync_peers=>SynPeers,
-          ver=>list_to_binary(Ver)
-         }
-      }};
-
 h(<<"GET">>, [<<"miner">>,TAddr], _Req) ->
     {200,
      #{ result => <<"ok">>,
@@ -62,7 +23,7 @@ h(<<"GET">>, [<<"miner">>,TAddr], _Req) ->
 
 h(<<"GET">>, [<<"address">>,TAddr], _Req) ->
     try
-    Addr=case TAddr of
+    Addr=case TAddr of 
              <<"0x",Hex/binary>> ->
                  hex:parse(Hex);
              _ ->
@@ -126,18 +87,6 @@ h(<<"POST">>, [<<"test">>,<<"tx">>], Req) ->
     };
 
 h(<<"GET">>, [<<"block">>,BlockId], _Req) ->
-	QS=cowboy_req:parse_qs(_Req),
-	BinPacker=case proplists:get_value(<<"bin">>,QS) of
-				  <<"b64">> -> fun(Bin) -> base64:encode(Bin) end;
-				  <<"hex">> -> fun(Bin) -> bin2hex:dbin2hex(Bin) end;
-				  <<"raw">> -> fun(Bin) -> Bin end;
-				  _ -> fun(Bin) -> bin2hex:dbin2hex(Bin) end
-			  end,
-	Address=case proplists:get_value(<<"addr">>,QS) of
-				undefined -> undefined;
-				Addr -> naddress:decode(Addr)
-			end,
-
     BlockHash0=if(BlockId == <<"last">>) -> last;
                 true ->
                     hex:parse(BlockId)
@@ -150,14 +99,7 @@ h(<<"GET">>, [<<"block">>,BlockId], _Req) ->
               }
             };
         GoodBlock ->
-			ReadyBlock=if Address == undefined ->
-							  GoodBlock;
-						  is_binary(Address) ->
-							  filter_block(
-								GoodBlock,
-								Address)
-					   end,
-            Block=prettify_block(ReadyBlock,BinPacker),
+            Block=prettify_block(GoodBlock),
             {200,
              #{ result => <<"ok">>,
                 block => Block
@@ -318,7 +260,7 @@ h(<<"POST">>, [<<"register">>], Req) ->
     PKey=case maps:get(<<"public_key">>,Body) of
               <<"0x",BArr/binary>> ->
                   hex:parse(BArr);
-              Any ->
+              Any -> 
                   base64:decode(Any)
           end,
 
@@ -328,7 +270,7 @@ h(<<"POST">>, [<<"register">>], Req) ->
     %}.
 
     case txpool:new_tx(BinTx) of
-        {ok, Tx} ->
+        {ok, Tx} -> 
             {200,
              #{ result => <<"ok">>,
                 pkey=>bin2hex:dbin2hex(PKey),
@@ -349,7 +291,7 @@ h(<<"POST">>, [<<"register">>], Req) ->
 h(<<"POST">>, [<<"address">>], Req) ->
     [Body]=apixiom:bodyjs(Req),
     lager:debug("New tx from ~s: ~p",[Body]),
-    A=hd(Body),
+    A=hd(Body), 
     R=naddress:encode(A),
     {200,
      #{ result => <<"ok">>,
@@ -366,7 +308,7 @@ h(<<"POST">>, [<<"tx">>,<<"debug">>], Req) ->
     BinTx=case maps:get(<<"tx">>,Body,undefined) of
               <<"0x",BArr/binary>> ->
                   hex:parse(BArr);
-              Any ->
+              Any -> 
                   base64:decode(Any)
           end,
     X=tx:unpack(BinTx),
@@ -383,12 +325,12 @@ h(<<"POST">>, [<<"tx">>,<<"new">>], Req) ->
     BinTx=case maps:get(<<"tx">>,Body,undefined) of
               <<"0x",BArr/binary>> ->
                   hex:parse(BArr);
-              Any ->
+              Any -> 
                   base64:decode(Any)
           end,
     %lager:info_unsafe("New tx ~p",[BinTx]),
     case txpool:new_tx(BinTx) of
-        {ok, Tx} ->
+        {ok, Tx} -> 
             {200,
              #{ result => <<"ok">>,
                 txid => Tx
@@ -419,26 +361,14 @@ h(_Method, [<<"status">>], Req) ->
 
 %PRIVATE API
 
-filter_block(Block, Address) ->
-	maps:map(
-	  fun(bals,B) ->
-			  maps:with([Address],B);
-		 (txs, B) ->
-			  [ {TxID, TX} || {TxID, #{from:=F, to:=T}=TX} <- B, F==Address orelse T==Address ];
-		 (_,V) -> V
-	  end, Block).
-
-prettify_block(Block) ->
-	prettify_block(Block, fun(Bin) -> bin2hex:dbin2hex(Bin) end).
-
-prettify_block(#{}=Block0, BinPacker) ->
+prettify_block(#{}=Block0) ->
     maps:map(
       fun(sign,Signs) ->
-              show_signs(Signs,BinPacker);
+              show_signs(Signs);
          (hash,BlockHash) ->
-              BinPacker(BlockHash);
+              bin2hex:dbin2hex(BlockHash);
          (child,BlockHash) ->
-              BinPacker(BlockHash);
+              bin2hex:dbin2hex(BlockHash);
          (bals,Bal) ->
               maps:fold(
                 fun(BalAddr,V,A) ->
@@ -448,24 +378,24 @@ prettify_block(#{}=Block0, BinPacker) ->
                            true ->
                                LastBlk=maps:get(lastblk,V),
                                  maps:put(lastblk,
-                                          BinPacker(LastBlk),
+                                          bin2hex:dbin2hex(LastBlk),
                                           maps:remove(ublk,V)
                                          )
                        end,
                        PrettyBal=maps:map(
                                  fun(pubkey,PubKey) ->
-                                         BinPacker(PubKey);
-                                     (_BalKey,BalVal) ->
+                                         bin2hex:dbin2hex(PubKey);
+                                     (_BalKey,BalVal) -> 
                                          BalVal
                                  end, FixedBal),
-                       maps:put(BinPacker(BalAddr),PrettyBal,A)
+                       maps:put(bin2hex:dbin2hex(BalAddr),PrettyBal,A)
                 end, #{}, Bal);
          (header,BlockHeader) ->
               maps:map(
                 fun(parent,V) ->
-                        BinPacker(V);
+                        bin2hex:dbin2hex(V);
                    (_K,V) when is_binary(V) andalso size(V) == 32 ->
-                        BinPacker(V);
+                        bin2hex:dbin2hex(V);
                    (_K,V) ->
                         V
                 end, BlockHeader);
@@ -478,29 +408,29 @@ prettify_block(#{}=Block0, BinPacker) ->
                                  fun(patch,Payload) ->
                                          settings:dmp(Payload);
                                     (signatures,Sigs) ->
-                                         show_signs(Sigs, BinPacker);
+                                         show_signs(Sigs);
                                     (_K,V) -> V
                                  end, CBody)}
-                end,
+                end, 
                 Settings
                );
          (inbound_blocks,IBlocks) ->
               lists:map(
                 fun({BHdr,BBody}) ->
-                        {BHdr,
-                         prettify_block(BBody,BinPacker)
+                        {BHdr, 
+                         prettify_block(BBody)
                         }
-                end,
+                end, 
                 IBlocks
                );
 
          (tx_proof,Proof) ->
               lists:map(
                 fun({CHdr,CBody}) ->
-                        {CHdr,
-                         [BinPacker(H) || H<-tuple_to_list(CBody)]
+                        {CHdr, 
+                         [bin2hex:dbin2hex(H) || H<-tuple_to_list(CBody)]
                         }
-                end,
+                end, 
                 Proof
                );
          (txs, TXS) ->
@@ -509,50 +439,48 @@ prettify_block(#{}=Block0, BinPacker) ->
                         {TxID,
                          maps:map(
                            fun(register, Val) ->
-                                   BinPacker(Val);
+                                   bin2hex:dbin2hex(Val);
                               (from, <<Val:8/binary>>) ->
-                                   BinPacker(Val);
+                                   bin2hex:dbin2hex(Val);
                               (to, <<Val:8/binary>>) ->
-                                   BinPacker(Val);
+                                   bin2hex:dbin2hex(Val);
                               (address, Val) ->
-                                   BinPacker(Val);
-                              (sig,#{}=V1) ->
+                                   bin2hex:dbin2hex(Val);
+                              (sig,#{}=V1) -> 
                                  [
-                                  {BinPacker(SPub),
-                                   BinPacker(SPri)} || {SPub,SPri} <- maps:to_list(V1) ];
+                                  {bin2hex:dbin2hex(SPub),
+                                   bin2hex:dbin2hex(SPri)} || {SPub,SPri} <- maps:to_list(V1) ];
                            (_,V1) -> V1
                            end, maps:without([public_key,signature],TXB))
                         }
-                end,
+                end, 
                 TXS
                );
          (_,V) ->
               V
       end, Block0);
 
-prettify_block(#{hash:=<<0,0,0,0,0,0,0,0>>}=Block0, BinPacker) ->
-    Block0#{ hash=>BinPacker(<<0:64/big>>) }.
+prettify_block(#{hash:=<<0,0,0,0,0,0,0,0>>}=Block0) -> 
+    Block0#{ hash=><<"0000000000000000">> }.
 
-show_signs(Signs, BinPacker) ->
+show_signs(Signs) ->
     lists:map(
       fun(BSig) ->
               #{binextra:=Hdr,
                 extra:=Extra,
                 signature:=Signature}=bsig:unpacksig(BSig),
-			  UExtra=lists:map(
+              #{ binextra => bin2hex:dbin2hex(Hdr),
+                 signature => bin2hex:dbin2hex(Signature),
+                 extra =>
+                 lists:map(
                    fun({K,V}) ->
                            if(is_binary(V)) ->
-                                 {K,BinPacker(V)};
+                                 {K,bin2hex:dbin2hex(V)};
                              true ->
                                  {K,V}
                            end
                    end, Extra
-                  ),
-			  NodeID=proplists:get_value(pubkey,Extra,<<>>),
-              #{ binextra => BinPacker(Hdr),
-                 signature => BinPacker(Signature),
-                 extra =>UExtra,
-				 nodeid => nodekey:node_id(NodeID)
+                  )
                }
       end, Signs).
 
