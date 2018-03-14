@@ -76,6 +76,13 @@ handle_cast({tpic, _From, #{
     lager:info("BV sig from other chain"),
     {noreply, State};
 
+handle_cast({signature, BlockHash, _Sigs}=WholeSig, 
+            #{lastblock:=#{hash:=LBH}}=State) when LBH==BlockHash->
+    lager:info("BV Got extra sig for ~s ~p",[blkid(BlockHash),WholeSig]),
+    gen_server:cast(blockchain,WholeSig),
+    {noreply, State};
+
+
 handle_cast({signature, BlockHash, Sigs}, #{candidatesig:=Candidatesig}=State) ->
     lager:info("BV Got sig for ~s",[blkid(BlockHash)]),
     CSig0=maps:get(BlockHash,Candidatesig,#{}),
@@ -156,7 +163,11 @@ checksig(BlockHash, Sigs, Acc0) ->
                                       blkid(BlockHash),
                                       bin2hex:dbin2hex(Pub)
                                      ]),
-                      maps:put(Pub,US,Acc);
+					  case maps:is_key(Pub, Acc) of
+						  true -> Acc;
+						  false ->
+							  maps:put(Pub,US,Acc)
+					  end;
                   false ->
                       Acc
               end

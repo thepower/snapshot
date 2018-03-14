@@ -1,6 +1,7 @@
 -module(tx).
 
 -export([get_ext/2,set_ext/3,sign/2,verify/1,pack/1,unpack/1]).
+-export([txlist_hash/1]).
 
 -ifndef(TEST).
 -define(TEST,1).
@@ -44,7 +45,6 @@ mkmsg(#{ from:=From, amount:=Amount,
         false -> ok
     end,
     Append=maps:get(extradata,Tx,<<"">>),
-    lager:info("tx ~p",[Tx]),
     if is_binary(From) -> ok;
        true -> throw('non_bin_addr_from')
     end,
@@ -116,7 +116,6 @@ verify(#{
   timestamp := T
  }=Tx) ->
     Message=mkmsg(Tx),
-    lager:info("MsgVer ~p",[Message]),
     if is_integer(T) -> 
            ok;
        true ->
@@ -242,12 +241,10 @@ unpack(BinTx) when is_binary(BinTx) ->
     unpack_mp(BinTx).
 
 unpack_mp(BinTx) when is_binary(BinTx) ->
-    lager:info("mp ~p",[BinTx]),
     {ok, Tx0} = msgpack:unpack(BinTx, [{known_atoms, 
                                         [type,sig,tx,patch,register,
                                          register,address,block] },
                                        {unpack_str,as_binary}] ),
-    lager:info("TX ~p",[Tx0]), 
     Tx=maps:fold(
          fun
              ("tx",Val,Acc) ->
@@ -372,6 +369,15 @@ unpack_mp(BinTx) when is_binary(BinTx) ->
             R
     end.
 
+txlist_hash(List) ->
+	crypto:hash(sha256,
+				iolist_to_binary(lists:foldl(
+								   fun({Id,Bin},Acc) when is_binary(Bin) ->
+										   [Id,Bin|Acc];
+									  ({Id,#{}=Tx},Acc) ->
+										   [Id,tx:pack(Tx)|Acc]
+								   end, [], lists:keysort(1,List)))).
+
 -ifdef(TEST).
 register_test() ->
     Priv= <<194,124,65,109,233,236,108,24,50,151,189,216,
@@ -471,6 +477,40 @@ new_tx_test() ->
     ?assertEqual(#{invalid => 0,valid => 1},maps:get(sigverify,CheckTx2)),
     ?assertEqual(#{invalid => 0,valid => 1},maps:get(sigverify,CheckTx2r)),
     BinTx2r.
+
+txs_sig_test() ->
+	Pvt1= <<194,124,65,109,233,236,108,24,50,151,189,216,23,42,215,220,24,240,248,115,150,54,239,58,218,221,145,246,158,15,210,165>>,
+	Addr=naddress:construct_public(1,2,3),
+	BinTx1=sign(#{
+			 from => Addr,
+			 to => Addr,
+			 cur => <<"test">>,
+			 timestamp => 1512450000,
+			 seq => 1,
+			 amount => 10
+			},Pvt1),
+	BinTx2=sign(#{
+			 from => Addr,
+			 to => Addr,
+			 cur => <<"test2">>,
+			 timestamp => 1512450011,
+			 seq => 2,
+			 amount => 20
+			},Pvt1),
+	Txs=[{<<"txid1">>,BinTx1}, {<<"txid2">>,BinTx2}],
+	H1=txlist_hash(Txs),
+
+	Txs2=[ {<<"txid2">>,tx:unpack(BinTx2)}, {<<"txid1">>,tx:unpack(BinTx1)} ],
+	H2=txlist_hash(Txs2),
+
+	Txs3=[ {<<"txid1">>,tx:unpack(BinTx2)}, {<<"txid2">>,tx:unpack(BinTx1)} ],
+	H3=txlist_hash(Txs3),
+
+	[
+    ?assertEqual(H1,H2),
+    ?assertNotEqual(H1,H3)
+	].
+
 
 tx_test() ->
     Pvt1= <<194,124,65,109,233,236,108,24,50,151,189,216,23,42,215,220,24,240,248,115,150,54,239,58,218,221,145,246,158,15,210,165>>,
