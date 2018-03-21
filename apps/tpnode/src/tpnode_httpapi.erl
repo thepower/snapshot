@@ -36,6 +36,10 @@ h(<<"GET">>, [<<"node">>,<<"status">>], _Req) ->
             fun(#{addr:=_Addr, auth:=Auth, state:=Sta}) ->
                     #{auth=>Auth,
                       state=>Sta
+                     };
+			   (#{addr:=_Addr}) ->
+					#{auth=>unknown,
+                      state=>unknown
                      }
             end, tpic:peers()),
     SynPeers=gen_server:call(synchronizer,peers),
@@ -51,7 +55,7 @@ h(<<"GET">>, [<<"node">>,<<"status">>], _Req) ->
 			header=>Header
 		   },
 		  xchain_inbound => gen_server:call(xchain_dispatcher,peers),
-		  xchain_outbound => gen_server:call(crosschain,peers),
+		  xchain_outbound => gen_server:call(xchain_client,peers),
           tpic_peers=>Peers,
           sync_peers=>SynPeers,
           ver=>list_to_binary(Ver)
