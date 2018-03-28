@@ -4,7 +4,6 @@
 
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).
--define(DEFAULT_SCOPE, [tpic, xchain, api]).
 
 %% ------------------------------------------------------------------
 %% API Function Exports
@@ -29,8 +28,8 @@
 %% ------------------------------------------------------------------
 
 start_link(Options) ->
-    Name = maps:get(name, Options, discovery),
-    lager:notice("start_link for ~p", [Name]),
+    #{name := Name} = Options,
+    lager:notice("start ~p", [Name]),
     gen_server:start_link({local, Name}, ?MODULE, Options, []).
 
 my_address_v6() ->
@@ -67,19 +66,17 @@ my_address_v4() ->
 
 init(Args) ->
     lager:notice("start discovery"),
+    #{pid:=ParentPid} = Args,
     CheckExpireInterval = maps:get(check_expire_interval, Args, 60), % in seconds
     Settings = read_config(),
     AnnounceServicesInterval = maps:get(announce_interval, Settings, 60), % in seconds
-    LocalServices =
-        #{
+    {ok, #{
+        pid => ParentPid,
+        settings => Settings,
+        local_services => #{
             names => #{},
             pids => #{}
         },
-    PermanentServices = maps:get(services, Args, []),
-
-    {ok, #{
-        settings => Settings,
-        local_services => init_local_serivces(PermanentServices, LocalServices),
         remote_services => #{},
         check_expire_interval => CheckExpireInterval,
         announce_interval => AnnounceServicesInterval,
@@ -151,7 +148,7 @@ handle_cast(make_announce, #{local_services:=Dict} = State) ->
 
 
 handle_cast({got_announce, AnnounceBin}, #{remote_services:=Dict} = State) ->
-%%    lager:debug("Got service announce ~p", [AnnounceBin]),
+    lager:debug("Got service announce ~p", [AnnounceBin]),
     try
         Announce =
             case unpack(AnnounceBin) of
@@ -159,17 +156,8 @@ handle_cast({got_announce, AnnounceBin}, #{remote_services:=Dict} = State) ->
                 {ok, Unpacked} -> Unpacked
             end,
 
-        lager:debug("Announce details: ~p", [Announce]),
-
         case validate_announce(Announce, State) of
             error -> throw(error);
-            _ -> ok
-        end,
-
-        case is_local_service(Announce) of
-            true ->
-                lager:debug("skip copy of local service: ~p", [Announce]),
-                throw(error);
             _ -> ok
         end,
 
@@ -231,22 +219,6 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
-
-init_local_serivces(PermanentServices, Dict) ->
-    Registrator =
-        fun F(ServiceName, CurrentDict) when is_binary(ServiceName) ->
-            Name = <<ServiceName/binary, "peer">>,
-            register_service(Name, nopid, CurrentDict, #{});
-            F(ServiceName, CurrentDict) when is_list(ServiceName) ->
-                F(list_to_binary(ServiceName), CurrentDict);
-            F(ServiceName, CurrentDict) when is_atom(ServiceName) ->
-                F(atom_to_binary(ServiceName, utf8), CurrentDict);
-            F(_InvalidServiceName, CurrentDict) ->
-                lager:info("invalid permanent service name: ~p", [_InvalidServiceName]),
-                CurrentDict
-        end,
-    lists:foldl(Registrator, Dict, PermanentServices).
-
 read_config() ->
     application:get_env(tpnode, discovery, #{}).
 
@@ -265,130 +237,64 @@ get_unixtime() ->
     (Mega * 1000000 + Sec).
 
 
-
-announce_one_service(Name, Address, ValidUntil, Scopes) ->
+announce_one_service(Name, #{address:=IP}=Address0, ValidUntil) ->
     try
-        TranslatedAddress = translate_address(Address),
-        lager:debug(
-            "make announce for service ~p, address: ~p, scopes: ~p",
-            [Name, TranslatedAddress, Scopes]
-        ),
+        Address =
+            case IP of
+                local4 ->
+                    maps:put(address, hd(discovery:my_address_v4()), Address0);
+                local6 ->
+                    maps:put(address, hd(discovery:my_address_v6()), Address0);
+                _ ->
+                    Address0
+            end,
+        lager:debug("make announce for service ~p, ip: ~p", [Name, IP]),
         Announce = #{
             name => Name,
-            address => TranslatedAddress,
+            address => Address,
             valid_until => ValidUntil,
-            nodeid => nodekey:node_id(),
-            scopes => Scopes
+            nodeid => nodekey:node_id()
         },
         AnnounceBin = pack(Announce),
         send_service_announce(AnnounceBin)
     catch
         Err:Reason ->
-            lager:error(
-                "Announce with name ~p and address ~p and scopes ~p hasn't made because ~p ~p",
-                [Name, Address, Scopes, Err, Reason]
-            )
+            lager:error("Announce with name ~p hasn't made because ~p ~p", [Err, Reason])
     end.
 
 
-%%is_address_advertisable(Address, #{options:=Options} = _ServiceOptions) ->
-%%    is_address_advertisable(Address, {options, Options});
-%%
-%%is_address_advertisable(Address, {options, #{filter:=Filter} = _Options}) ->
-%%    is_address_advertisable(Address, {filter, Filter});
-%%
-%%% filter services by protocol
-%%is_address_advertisable(#{proto:=Proto} = _Address, {filter, #{proto:=FilterProto}=_Filter})
-%%    when Proto == FilterProto ->
-%%    true;
-%%
-%%is_address_advertisable(_Address, _ServiceOptions) ->
-%%    false.
-%%
+is_address_advertisable(Address, #{options:=Options} = _ServiceOptions) ->
+    is_address_advertisable(Address, {options, Options});
 
+is_address_advertisable(Address, {options, #{filter:=Filter} = _Options}) ->
+    is_address_advertisable(Address, {filter, Filter});
 
-%%find_local_service(
-%%  #{address:=AnnIp, port:=AnnPort} = _Announce,
-%%  [ #{address:=LocalIp, port:=LocalPort} = _Address | Rest ]
-%%) when AnnIp =:= LocalIp andalso AnnPort =:= LocalPort ->
-%%    true;
-%%
-%%find_local_service( _Announce, [] )->
-%%    false;
-%%
-%%find_local_service(Announce, [ _Address | Rest ]) ->
-%%    find_local_service(Announce, Rest).
-%%
-%%
-%%is_local_service(Announce, State) ->
-%%    LocalServices = get_config(addresses, [], State),
-%%    TranslatedLocalServices = lists:map(
-%%        fun(Address) -> translate_address(Address) end,
-%%        LocalServices
-%%    ),
-%%    find_local_service(Announce, TranslatedLocalServices).
+% filter services by protocol
+is_address_advertisable(#{proto:=Proto} = _Address, {filter, #{proto:=FilterProto}=_Filter})
+    when Proto == FilterProto ->
+    true;
 
-
-is_local_service(#{<<"nodeid">>:=RemoteNodeId} = _Announce) ->
-    MyNodeId = nodekey:node_id(),
-    MyNodeId =:= RemoteNodeId;
-
-is_local_service(_Announce) ->
+is_address_advertisable(_Address, _ServiceOptions) ->
     false.
 
 
-
-
-% return true if Scope is exists for ServiceName in AllScopesCfg configuration,
-% we use scopes [tpic, xchain, api] by default if configuration for ServiceName isn't exists in config.
-in_scope(ServiceName, ScopeToCheck, AllScopesCfg) ->
-    AllowedScopes = get_scopes(ServiceName, AllScopesCfg),
-    lists:member(ScopeToCheck, AllowedScopes).
-
-get_scopes(ServiceName, AllScopesCfg) ->
-    maps:get(ServiceName, AllScopesCfg, ?DEFAULT_SCOPE).
-
-is_right_proto(ServiceName, Proto) when is_binary(Proto) ->
-    (<<Proto/binary, "peer">> =:= ServiceName);
-
-is_right_proto(ServiceName, Proto) when is_atom(Proto) ->
-    is_right_proto(ServiceName, atom_to_binary(Proto, utf8));
-
-is_right_proto(ServiceName, Proto) when is_list(Proto) ->
-    is_right_proto(ServiceName, list_to_binary(Proto));
-
-is_right_proto(_ServiceName, Proto) ->
-    lager:info("invalid protocol: ~p", Proto),
-    false.
-
-
-% make announce of our local services with tpic scope
+% make announce of our local services via tpic
 make_announce(#{names:=Names} = _Dict, State) ->
     lager:debug("Announcing our local services"),
     ValidUntil = get_unixtime() + get_config(our_ttl, 120, State),
     Addresses = get_config(addresses, [], State),
-    AllScopesCfg = get_config(scope, #{}, State),
 
-    Announcer = fun(Name, _ServiceSettings, Counter) ->
+    Announcer = fun(Name, ServiceSettings, Counter) ->
         Counter + lists:foldl(
-            % #{address => local4, port => 53221, proto => tpic}
-            fun(#{proto := Proto} = Address, AddrCounter) ->
-                Scopes = get_scopes(Proto, AllScopesCfg),
-                IsAdvertisable = in_scope(Proto, tpic, AllScopesCfg),
-                IsRightProto = is_right_proto(Name, Proto),
-%%                lager:debug("ann dbg ~p ~p ~p ~p", [Name, IsAdvertisable, IsRightProto, Address]),
-
+            fun(Address, AddrCounter) ->
+                IsAdvertisable = is_address_advertisable(Address, ServiceSettings),
                 if
-                    IsRightProto == true andalso IsAdvertisable == true ->
-                        announce_one_service(Name, Address, ValidUntil, Scopes),
+                    IsAdvertisable == true ->
+                        announce_one_service(Name, Address, ValidUntil),
                         AddrCounter + 1;
                     true ->
-%%                        lager:debug("skip announce for address ~p ~p", [Name, Address]),
                         AddrCounter
-                end;
-                ( Address, AddrCounter ) ->
-                    lager:debug("skip announce for invalid address ~p ~p", [Name, Address]),
-                    AddrCounter
+                end
             end,
             0,
             Addresses)
@@ -405,65 +311,31 @@ find_service(Name, #{names:=NamesDict}) when is_binary(Name) ->
     lager:debug("find service by name ~p", [Name]),
     maps:find(Name, NamesDict).
 
-
 register_service(Name, Pid, #{names:=NameDict, pids:=PidDict} = _Dict, Options) ->
-    Record0 = #{
+    Record = #{
         pid => Pid,
-        monitor => nopid,
+        monitor => monitor(process, Pid),
         updated => get_unixtime(),
         options => Options
     },
-
-    Record =
-        case Pid of
-            nopid ->
-                Record0;
-            _ ->
-                Record0#{
-                    monitor => monitor(process, Pid)
-                }
-        end,
-
-    NewNames = maps:put(Name, Record, NameDict),
-
-    NewPidDict =
-        case Pid of
-            nopid ->
-                PidDict;
-            _ ->
-                maps:put(Pid, Name, PidDict)
-        end,
-
     #{
-        names => NewNames,
-        pids => NewPidDict
+        names=>maps:put(Name, Record, NameDict),
+        pids=>maps:put(Pid, Name, PidDict)
     }.
 
 
-
-% delete local service from local dict
-delete_service(nopid, Dict) ->
-    Dict;
-
 delete_service(Name, #{pids:=PidsDict, names:=NamesDict} = Dict) when is_binary(Name) ->
     case find_service(Name, Dict) of
-        {ok, #{pid := nopid}} ->
-            Dict#{
-                names => maps:without([Name], NamesDict)
-            };
         {ok, #{pid := Pid, monitor := Ref}} ->
             demonitor(Ref),
             Dict#{
                 pids => maps:without([Pid], PidsDict),
                 names => maps:without([Name], NamesDict)
             };
-        Invalid ->
-            lager:debug("try to delete service with unexisting name ~p, result ~p", [Name, Invalid]),
+        error ->
+            lager:debug("try to delete service with unexisting name ~p", [Name]),
             Dict
     end;
-
-delete_service(nopid, Dict) ->
-    Dict;
 
 delete_service(Pid, Dict) when is_pid(Pid) ->
     case find_service(Pid, Dict) of
@@ -472,23 +344,6 @@ delete_service(Pid, Dict) when is_pid(Pid) ->
         error ->
             lager:debug("try to delete service with unexisting pid ~p", [Pid]),
             Dict
-    end;
-
-delete_service(InvalidName, Dict) ->
-    lager:debug("try to delete service with invalid name ~p", [InvalidName]),
-    Dict.
-
-
-
-% translate IP address aliases to local IPv4 or IPv6 address
-translate_address(#{address:=IP}=Address0) when is_map(Address0) ->
-    case IP of
-        local4 ->
-            maps:put(address, hd(discovery:my_address_v4()), Address0);
-        local6 ->
-            maps:put(address, hd(discovery:my_address_v6()), Address0);
-        _ ->
-            Address0
     end.
 
 
@@ -496,21 +351,7 @@ translate_address(#{address:=IP}=Address0) when is_map(Address0) ->
 query_local(Name, #{names:=Names}=_Dict, State) ->
     case maps:is_key(Name, Names) of
         false -> [];
-        true ->
-            LocalAddresses = get_config(addresses, [], State),
-            RightAddresses = lists:filter(
-                fun(#{proto:=Proto}) ->
-                    is_right_proto(Name, Proto);
-                    (_InvalidAddress) ->
-                        lager:info("invalid address: ~p", [_InvalidAddress]),
-                        false
-                end,
-                LocalAddresses
-            ),
-            lists:map(
-                fun(Address) -> translate_address(Address) end,
-                RightAddresses
-            )
+        true -> get_config(addresses, [], State)
     end.
 
 % find addresses of remote service
@@ -523,18 +364,16 @@ query_remote(Name, Dict) ->
         end, Announces
     ).
 
-query(Pred, _State) when is_function(Pred) ->
-    lager:error("Not inmplemented"),
-    error;
 
+query(Pred, _State) when is_function(Pred) ->
+    lager:info("Not inmplemented"),
+    error;
 
 % find service by name
 query(Name, State) ->
     #{local_services := LocalDict, remote_services := RemoteDict} = State,
     Local = query_local(Name, LocalDict, State),
     Remote = query_remote(Name, RemoteDict),
-%%    lager:debug("query ~p local: ~p", [Name, Local]),
-%%    lager:debug("query ~p remote: ~p", [Name, Remote]),
     lists:merge(Local, Remote).
 
 
@@ -547,16 +386,9 @@ address2key(Invalid) ->
 
 
 % foreign service announce validation
-validate_announce(
-          #{
-              name := _Name,
-              address := _Address,
-              valid_until := ValidUntil,
-              nodeid := _NodeId,
-              scopes := _Scopes
-          } = Announce,
-          State) ->
+validate_announce(Announce, State) ->
     try
+        #{valid_until:=ValidUntil} = Announce,
         MaxExpireTime = get_unixtime() + get_config(max_allowed_ttl, 1800, State),
         case ValidUntil =< MaxExpireTime of
             true -> ok;
@@ -571,64 +403,44 @@ validate_announce(
             lager:debug("invalid announce ~p", [Announce]),
             error
     end,
-    ok;
-
-validate_announce(Announce, _State) ->
-    lager:debug("invalid announce ~p", [Announce]),
-    error.
-
+    ok.
 
 % parse foreign service announce and add it to services database
-process_announce(#{name := Name, address := Address} = Announce, Dict, AnnounceBin) ->
+process_announce(Announce, Dict, AnnounceBin) ->
     try
+        #{name := Name, address := Address} = Announce,
         Key = address2key(Address),
         Nodes = maps:get(Name, Dict, #{}),
-        PrevAnnounce = maps:get(Key, Nodes, #{valid_until => 0}),
+        PrevAnnounce = maps:get(Key, Nodes, not_found),
         relay_announce(PrevAnnounce, Announce, AnnounceBin),
         UpdatedNodes = maps:put(Key, Announce, Nodes),
         maps:put(Name, UpdatedNodes, Dict)
     catch
-        Err:Reason ->
-            lager:error("skip announce ~p because error: ~p ~p", [Announce, Err, Reason]),
+        _ ->
+            lager:error("skip announce ~p because error", [Announce]),
             Dict
-    end;
-
-process_announce(Announce, Dict, _AnnounceBin) ->
-    lager:error("invalid announce: ~p", [Announce]),
-    Dict.
+    end.
 
 
 % relay announce to connected nodes
 relay_announce(
         #{valid_until:=ValidUntilPrev} = _PrevAnnounce,
-        #{valid_until:=ValidUntilNew, nodeid:=NodeId} = NewAnnounce,
+        #{valid_until:=ValidUntilNew} = NewAnnounce,
         AnnounceBin)
-    when is_binary(AnnounceBin)
+    when ValidUntilPrev /= ValidUntilNew
+    andalso is_binary(AnnounceBin)
     andalso size(AnnounceBin) > 0 ->
 
-    MyNodeId = nodekey:node_id(),
-    if
-        NodeId =:= MyNodeId ->
-            lager:debug("skip relaying of self announce: ~p", [NewAnnounce]),
-            norelay;
-        ValidUntilPrev /= ValidUntilNew ->
-            lager:debug("relay announce ~p", [NewAnnounce]),
-            send_service_announce(AnnounceBin);
-        ValidUntilPrev =:= ValidUntilNew ->
-%%            lager:debug("skip relaying of announce (equal validuntil): ~p", [NewAnnounce]),
-            norelay;
-        true ->
-            lager:debug("skip relaying of announce: new ~p, prev ~p", [NewAnnounce, _PrevAnnounce]),
-            norelay
-    end;
+    lager:debug("relay announce ~p", [NewAnnounce]),
+    send_service_announce(AnnounceBin);
 
-relay_announce(_PrevAnnounce, NewAnnounce, _AnnounceBin) ->
-    lager:debug("skip relaying of invalid announce ~p", [NewAnnounce]),
+
+relay_announce(_, _, _) ->
     norelay.
 
 
 send_service_announce(AnnounceBin) ->
-%%    lager:debug("send tpic announce ~p", [AnnounceBin]),
+    lager:debug("sent tpic ~p", [AnnounceBin]),
     tpic:cast(tpic, service, {<<"discovery">>, AnnounceBin}).
 
 add_sign_to_bin(Sign, Data) ->
@@ -667,7 +479,7 @@ unpack(<<254, _Rest/binary>> = Packed) ->
                 lager:debug("checksig result ~p", [_X]),
                 throw(invalid_signature)
         end,
-        Atoms = [address, name, valid_until, port, proto, tpic, nodeid, scopes, xchain, api],
+        Atoms = [address, name, valid_until, port, proto, tpic],
         case msgpack:unpack(Bin, [{known_atoms, Atoms}]) of
             {ok, Message} ->
                 {ok, Message};
