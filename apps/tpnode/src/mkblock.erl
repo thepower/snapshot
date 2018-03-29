@@ -114,27 +114,13 @@ handle_info(process, #{settings:=#{mychain:=MyChain}=MySet,preptxl:=PreTXL}=Stat
                          MyChain;
                     (settings) ->
                          blockchain:get_settings();
-                    ({valid_timestamp,TS}) ->
-						 abs(os:system_time(millisecond)-TS)<3600000;
-					({endless,From,Cur}) ->
-						 EndlessPath=[<<"current">>,<<"endless">>,From,Cur],
-						 case blockchain:get_settings(EndlessPath) of
-							 true -> true;
-							 _ ->
-								 % TODO 2018-05-01: Replace this code with false
-								 Endless=lists:member(
-										   From,
-										   application:get_env(tpnode,endless,[])
-										  ),
-								 if Endless ->
-										lager:notice("Deprecated: issue tokens by address in config");
-									true ->
-										ok
-								 end,
-								 Endless
-						 end
-				 end,
-		AddrFun=fun({Addr,Cur}) ->
+                    ({endless,From,_Cur}) ->
+                         lists:member(
+                           From,
+                           application:get_env(tpnode,endless,[])
+                          )
+                 end,
+        AddrFun=fun({Addr,Cur}) ->
                         gen_server:call(blockchain,{get_addr,Addr,Cur});
                    (Addr) ->
                         gen_server:call(blockchain,{get_addr,Addr})
@@ -255,7 +241,6 @@ try_process([{TxID,
             #{success:=Success, failed:=Failed}=Acc) ->
     lager:notice("TODO:Check signature once again and check seq"),
     try
-		throw('fixme'),
         Bals=maps:get(To,Addresses),
         case Bals of
             #{} ->
@@ -286,7 +271,6 @@ try_process([{TxID,
             #{success:=Success, failed:=Failed}=Acc) ->
     lager:error("Check signature once again and check seq"),
     try
-		throw('fixme'),
         Bals=maps:get(From,Addresses),
         A1=maps:remove(keep,Bals),
         Empty=maps:size(A1)==0,
@@ -464,7 +448,9 @@ try_process_inbound([{TxID,
     end.
 
 try_process_outbound([{TxID,
-					   #{outbound:=OutTo,to:=To,from:=From}=Tx}
+					   #{outbound:=OutTo,
+						 cur:=Cur,seq:=Seq,timestamp:=Timestamp,
+						 amount:=Amount,to:=To,from:=From}=Tx}
 					  |Rest],
 					 SetState, Addresses, GetFun,
 					 #{failed:=Failed, 
@@ -482,14 +468,29 @@ try_process_outbound([{TxID,
 				   end,
 
 	try
-		RealSettings=EnsureSettings(SetState),
-		{NewF,GotFee}=withdraw(FBal,Tx,GetFun,RealSettings),
+		if Amount >= 0 ->
+			   ok;
+		   true ->
+			   throw ('bad_amount')
+		end,
+		CurFSeq=bal:get(seq,FBal),
+		if is_integer(Timestamp) -> ok;
+		   true -> throw ('non_int_timestamp')
+		end,
+		if CurFSeq < Seq -> ok;
+		   true -> throw ('bad_seq')
+		end,
+		CurFTime=bal:get(t,FBal),
+		if CurFTime < Timestamp -> ok;
+		   true -> throw ('bad_timestamp')
+		end,
 
 		PatchTxID= <<"out",(xchain:pack_chid(OutTo))/binary>>,
 		{SS2,Set2}=case lists:keymember(PatchTxID,1, Settings) of
 					   true ->
 						   {SetState, Settings};
 					   false ->
+						   RealSettings=EnsureSettings(SetState),
 						   ChainPath=[<<"current">>,<<"outward">>,
 									  xchain:pack_chid(OutTo)],
 						   PCP=case settings:get(ChainPath,RealSettings) of
@@ -507,6 +508,7 @@ try_process_outbound([{TxID,
 								   _ ->
 									   []
 							   end,
+						   lager:info("PreCP ~p",[PCP]),
 						   IncPtr=[#{<<"t">> => <<"set">>,
 									 <<"p">> => ChainPath++[<<"parent">>],
 									 <<"v">> => ParentHash
@@ -522,36 +524,81 @@ try_process_outbound([{TxID,
 							[SyncPatch|Settings]
 						   }
 				   end,
+
+		CurFAmount=bal:get_cur(Cur,FBal),
+		NewFAmount=if CurFAmount >= Amount ->
+						  CurFAmount - Amount;
+					  true ->
+						  case GetFun({endless,From,Cur}) of
+							  true ->
+								  CurFAmount - Amount;
+							  false ->
+								  throw ('insufficient_fund')
+						  end
+				   end,
+
+		NewF=maps:remove(keep,
+						 bal:mput( Cur, NewFAmount, Seq, Timestamp, FBal)
+						),
+
 		NewAddresses=maps:put(From,NewF,Addresses),
 		try_process(Rest,SS2,NewAddresses,GetFun,
-					savefee(GotFee,
-							Acc#{
-							  settings=>Set2,
-							  success=>[{TxID,Tx}|Success],
-							  outbound=>[{TxID,OutTo}|Outbound]
-							 })
-				   )
+					Acc#{
+					  settings=>Set2,
+					  success=>[{TxID,Tx}|Success],
+					  outbound=>[{TxID,OutTo}|Outbound]
+					 })
 	catch throw:X ->
 			  try_process(Rest,SetState,Addresses,GetFun,
 						  Acc#{failed=>[{TxID,X}|Failed]})
 	end.
 
 try_process_local([{TxID,
-                    #{cur:=Cur,amount:=Amount,to:=To,from:=From}=Tx}
+                    #{cur:=Cur,seq:=Seq,timestamp:=Timestamp,amount:=Amount,to:=To,from:=From}=Tx}
                    |Rest],
                   SetState, Addresses, GetFun,
                   #{success:=Success, failed:=Failed}=Acc) ->
     %lager:error("Check signature once again"),
     FBal=maps:get(From,Addresses),
     TBal=maps:get(To,Addresses),
-	EnsureSettings=fun(undefined) -> GetFun(settings);
-					  (SettingsReady) -> SettingsReady
-				   end,
-
     try
-		RealSettings=EnsureSettings(SetState),
-		{NewF,GotFee}=withdraw(FBal,Tx,GetFun,RealSettings),
+        if Amount >= 0 ->
+               ok;
+           true ->
+               throw ('bad_amount')
+        end,
+        if is_integer(Timestamp) -> ok;
+           true -> throw ('non_int_timestamp')
+        end,
+        CurFSeq=bal:get(seq,FBal),
+        if CurFSeq < Seq -> ok;
+           true -> throw ('bad_seq')
+        end,
+        CurFTime=bal:get(t,FBal),
+        if CurFTime < Timestamp -> ok;
+           true -> throw ('bad_timestamp')
+        end,
+
+        CurFAmount=bal:get_cur(Cur,FBal),
+        NewFAmount=if CurFAmount >= Amount ->
+                          CurFAmount - Amount;
+                      true ->
+                          case GetFun({endless,From,Cur}) of
+                              true ->
+                                  CurFAmount - Amount;
+                              false ->
+                                  throw ('insufficient_fund')
+                          end
+                   end,
         NewTAmount=bal:get_cur(Cur,TBal) + Amount,
+        NewF=maps:remove(keep,
+                         bal:mput(
+                           Cur,
+                           NewFAmount,
+                           Seq,
+                           Timestamp,
+                           FBal)
+                        ),
         NewT=maps:remove(keep,
                          bal:put_cur(
                            Cur,
@@ -561,123 +608,13 @@ try_process_local([{TxID,
         NewAddresses=maps:put(From,NewF,maps:put(To,NewT,Addresses)),
 
         try_process(Rest,SetState,NewAddresses,GetFun,
-					savefee(GotFee,
-							Acc#{success=>[{TxID,Tx}|Success]}
-						   )
-				   )
+                    Acc#{success=>[{TxID,Tx}|Success]})
     catch throw:X ->
               try_process(Rest,SetState,Addresses,GetFun,
                           Acc#{failed=>[{TxID,X}|Failed]})
     end.
 
-savefee({Cur, Fee, Tip}, #{fee:=FeeBal, tip:=TipBal}=Acc) ->
-	Acc#{
-	  fee=>bal:put_cur(Cur,Fee+bal:get_cur(Cur, FeeBal),FeeBal),
-	  tip=>bal:put_cur(Cur,Tip+bal:get_cur(Cur, TipBal),TipBal)
-	 }.
 
-withdraw(FBal,
-		 #{cur:=Cur,seq:=Seq,timestamp:=Timestamp,amount:=Amount,from:=From}=Tx,
-		 GetFun, 
-		 Settings
-		) ->
-	if Amount >= 0 ->
-		   ok;
-	   true ->
-		   throw ('bad_amount')
-	end,
-	if is_integer(Timestamp) -> 
-		   case GetFun({valid_timestamp,Timestamp}) of
-			   true ->
-				   ok;
-			   false ->
-				   throw ('invalid_timestamp')
-		   end;
-	   true -> throw ('non_int_timestamp')
-	end,
-	FSK=bal:get_cur(<<"SK">>,FBal),
-	LD=bal:get(t,FBal) div 86400000,
-	CD=Timestamp div 86400000,
-	FSKUsed=if CD>LD ->
-				   0;
-			   true ->
-				   bal:get(usk,FBal)
-			end,
-	if FSK < 1 -> 
-		   case GetFun({endless,From,<<"SK">>}) of
-			   true -> ok;
-			   false -> throw('no_sk')
-		   end;
-	   FSKUsed >= FSK -> throw('sk_limit');
-	   true -> ok
-	end,
-	CurFSeq=bal:get(seq,FBal),
-	if CurFSeq < Seq -> ok;
-	   true -> throw ('bad_seq')
-	end,
-	CurFTime=bal:get(t,FBal),
-	if CurFTime < Timestamp -> ok;
-	   true -> throw ('bad_timestamp')
-	end,
-	CurFAmount=bal:get_cur(Cur,FBal),
-	NewFAmount=if CurFAmount >= Amount ->
-					  CurFAmount - Amount;
-				  true ->
-					  case GetFun({endless,From,Cur}) of
-						  true ->
-							  CurFAmount - Amount;
-						  false ->
-							  throw ('insufficient_fund')
-					  end
-			   end,
-	NewBal=maps:remove(keep,
-				bal:mput(
-				  Cur,
-				  NewFAmount,
-				  Seq,
-				  Timestamp,
-				  FBal,
-				  if CD>LD -> reset;
-					 true -> true
-				  end
-				 )
-			   ),
-	GetFeeFun=fun (FeeCur) when is_binary(FeeCur) ->
-					  settings:get([<<"current">>,<<"fee">>,FeeCur],Settings);
-				  ({params, Parameter}) ->
-					  settings:get([<<"current">>,<<"fee">>,params,Parameter],Settings)
-			  end,
-	{FeeOK,#{cost:=MinCost}=Fee}=Rate=tx:rate(Tx, GetFeeFun),
-	lager:info("Rate ~p",[Rate]),
-	if FeeOK -> ok;
-	   true -> throw ({'insufficient_fee',MinCost})
-	end,
-	#{cost:=FeeCost,tip:=Tip0,cur:=FeeCur}=Fee,
-	if FeeCost == 0 ->
-		   {NewBal, {Cur, 0, 0}};
-	   true ->
-		   Tip=case GetFeeFun({params,<<"notip">>}) of
-				   1 -> 0;
-				   _ -> Tip0
-			   end,
-		   FeeAmount=FeeCost+Tip,
-		   CurFFeeAmount=bal:get_cur(FeeCur,NewBal),
-		   NewFFeeAmount=if CurFFeeAmount >= FeeAmount ->
-							 CurFFeeAmount - FeeAmount;
-						 true ->
-							 case GetFun({endless,From,FeeCur}) of
-								 true ->
-									 CurFFeeAmount - FeeAmount;
-								 false ->
-									 throw ('insufficient_fund_for_fee')
-							 end
-					  end,
-		   NewBal2=bal:put_cur(FeeCur,
-							   NewFFeeAmount,
-							   NewBal
-							  ),
-		   {NewBal2, {FeeCur, FeeCost, Tip}}
-	end.
 
 sign(Blk,ED) when is_map(Blk) ->
     PrivKey=nodekey:get_priv(),
@@ -759,23 +696,18 @@ generate_block(PreTXL,{Parent_Height,Parent_Hash},GetSettings,GetAddr) ->
 	  success:=Success,
 	  settings:=Settings,
 	  outbound:=Outbound,
-	  pick_block:=PickBlocks,
-	  fee:=FeeCollected,
-	  tip:=TipCollected
+	  pick_block:=PickBlocks
 	 }=try_process(TXL,XSettings,Addrs,GetSettings,
 				   #{export=>[],
 					 failed=>[],
 					 success=>[],
 					 settings=>[],
 					 outbound=>[],
-					 fee=>bal:new(),
-					 tip=>bal:new(),
 					 pick_block=>#{},
 					 parent=>Parent_Hash,
 					 height=>Parent_Height+1
 					}
 				  ),
-	lager:info("Collected fee ~p tip ~p",[FeeCollected, TipCollected]),
 	lager:info("MB Post Setting ~p",[Settings]),
 	OutChains=lists:foldl(
 				fun({_TxID,ChainID},Acc) ->
@@ -862,8 +794,7 @@ addrcheck(Addr) ->
 
 benchmark(N) ->
     Parent=crypto:hash(sha256,<<"123">>),
-    Pvt1= <<194,124,65,109,233,236,108,24,50,151,189,216,23,42,215,220,24,240,
-			248,115,150,54,239,58,218,221,145,246,158,15,210,165>>,
+    Pvt1= <<194,124,65,109,233,236,108,24,50,151,189,216,23,42,215,220,24,240,248,115,150,54,239,58,218,221,145,246,158,15,210,165>>,
     Pub1=tpecdsa:secp256k1_ec_pubkey_create(Pvt1, false),
     From=address:pub2addr(0,Pub1),
     Coin= <<"FTT">>,
@@ -982,8 +913,7 @@ alloc_addr_test() ->
     end,
     GetAddr=fun test_getaddr/1,
 
-    Pvt1= <<194,124,65,109,233,236,108,24,50,151,189,216,23,42,215,220,24,240,
-			248,115,150,54,239,58,218,221,145,246,158,15,210,165>>,
+    Pvt1= <<194,124,65,109,233,236,108,24,50,151,189,216,23,42,215,220,24,240,248,115,150,54,239,58,218,221,145,246,158,15,210,165>>,
     ParentHash=crypto:hash(sha256,<<"parent">>),
     Pub1=tpecdsa:secp256k1_ec_pubkey_create(Pvt1),
 
@@ -1038,61 +968,34 @@ mkblock_test() ->
                         <<"node2">> => 0,
                         <<"node3">> => 0,
                         <<"node4">> => 1
-                       },
-					  <<"current">> => #{
-						  <<"fee">> => #{
-							  params=>#{
-								enable => 1
-							   },
-							  <<"FTT">> => #{
-								  <<"base">> => 1,
-								  <<"baseextra">> => 64, 
-								  <<"kb">> => 10
-								 }
-							 }
-						 }
+                       }
                      };
                    ({endless,_Address,_Cur}) ->
                         false;
-                    ({valid_timestamp,TS}) ->
-						abs(os:system_time(millisecond)-TS)<3600000 
-						orelse
-						abs(os:system_time(millisecond)-(TS-86400000))<3600000; 
                    (Other) ->
                         error({bad_setting,Other})
                 end,
     GetAddr=fun test_getaddr/1,
 
-    Pvt1= <<194,124,65,109,233,236,108,24,50,151,189,216,23,42,215,220,24,240,
-			248,115,150,54,239,58,218,221,145,246,158,15,210,165>>,
+    Pvt1= <<194,124,65,109,233,236,108,24,50,151,189,216,23,42,215,220,24,240,248,115,150,54,239,58,218,221,145,246,158,15,210,165>>,
     ParentHash=crypto:hash(sha256,<<"parent">>),
-	SG=3,
 
     TX0=tx:unpack( tx:sign(
                      #{
-                     from=>naddress:construct_public(SG,OurChain,3),
+                     from=>naddress:construct_public(1,OurChain,3),
                      to=>naddress:construct_public(1,OurChain,3),
                      amount=>10,
                      cur=><<"FTT">>,
-					 extradata=>jsx:encode(#{
-								  fee=>2,
-								  feecur=><<"FTT">>
-								  %feecur same as tx cur if not specified
-								 }),
                      seq=>2,
                      timestamp=>os:system_time(millisecond)
                     },Pvt1)
                  ),
     TX1=tx:unpack( tx:sign(
                      #{
-                     from=>naddress:construct_public(SG,OurChain,3),
+                     from=>naddress:construct_public(1,OurChain,3),
                      to=>naddress:construct_public(1,OurChain,8),
                      amount=>9000,
                      cur=><<"BAD">>,
-					 extradata=>jsx:encode(#{
-								  fee=>1,
-								  feecur=><<"FTT">>
-								 }),
                      seq=>3,
                      timestamp=>os:system_time(millisecond)
                     },Pvt1)
@@ -1100,147 +1003,47 @@ mkblock_test() ->
 
 	TX2=tx:unpack( tx:sign(
                      #{
-                     from=>naddress:construct_public(SG,OurChain,3),
+                     from=>naddress:construct_public(1,OurChain,3),
                      to=>naddress:construct_public(1,OurChain+2,1),
                      amount=>9,
                      cur=><<"FTT">>,
-					 extradata=>jsx:encode(#{
-								  fee=>1,
-								  feecur=><<"FTT">>
-								 }),
                      seq=>4,
                      timestamp=>os:system_time(millisecond)
                     },Pvt1)
                  ),
 	TX3=tx:unpack( tx:sign(
                      #{
-                     from=>naddress:construct_public(SG,OurChain,3),
+                     from=>naddress:construct_public(1,OurChain,3),
                      to=>naddress:construct_public(1,OurChain+2,2),
                      amount=>2,
                      cur=><<"FTT">>,
-					 extradata=>jsx:encode(#{
-								  fee=>1,
-								  feecur=><<"FTT">>
-								 }),
                      seq=>5,
                      timestamp=>os:system_time(millisecond)
                     },Pvt1)
                  ),
-    TX4=tx:unpack( tx:sign(
-                     #{
-                     from=>naddress:construct_public(0,OurChain,3),
-                     to=>naddress:construct_public(1,OurChain,3),
-                     amount=>10,
-                     cur=><<"FTT">>,
-					 extradata=>jsx:encode(#{
-								  fee=>1,
-								  feecur=><<"FTT">>
-								 }),
-                     seq=>6,
-                     timestamp=>os:system_time(millisecond)
-                    },Pvt1)
-                 ),
-    TX5=tx:unpack( tx:sign(
-                     #{
-                     from=>naddress:construct_public(SG,OurChain,3),
-                     to=>naddress:construct_public(1,OurChain,3),
-                     amount=>1,
-                     cur=><<"FTT">>,
-					 extradata=>jsx:encode(#{
-								  fee=>1,
-								  feecur=><<"FTT">>
-								 }),
-                     seq=>7,
-                     timestamp=>os:system_time(millisecond)
-                    },Pvt1)
-                 ),
-    TX6=tx:unpack( tx:sign(
-                     #{
-                     from=>naddress:construct_public(SG,OurChain,3),
-                     to=>naddress:construct_public(1,OurChain,3),
-                     amount=>1,
-                     cur=><<"FTT">>,
-					 extradata=>jsx:encode(#{
-								  fee=>1,
-								  feecur=><<"FTT">>
-								 }),
-                     seq=>8,
-                     timestamp=>os:system_time(millisecond)+86400000
-                    },Pvt1)
-                 ),
-    TX7=tx:unpack( tx:sign(
-                     #{
-                     from=>naddress:construct_public(SG,OurChain,3),
-                     to=>naddress:construct_public(1,OurChain,3),
-                     amount=>1,
-                     cur=><<"FTT">>,
-					 extradata=>jsx:encode(#{
-								  fee=>1,
-								  feecur=><<"FTT">>,
-								  bigdata=><<"11111111111111111111111111",
-											 "11111111111111111111111111",
-											 "11111111111111111111111111",
-											 "11111111111111111111111111",
-											 "11111111111111111111111111",
-											 "11111111111111111111111111">>
-								 }),
-                     seq=>9,
-                     timestamp=>os:system_time(millisecond)+86400000
-                    },Pvt1)
-                 ),
-    TX8=tx:unpack( tx:sign(
-                     #{
-                     from=>naddress:construct_public(SG,OurChain,3),
-                     to=>naddress:construct_public(1,OurChain,3),
-                     amount=>1,
-                     cur=><<"FTT">>,
-					 extradata=>jsx:encode(#{
-								  fee=>200,
-								  feecur=><<"FTT">>
-								 }),
-                     seq=>9,
-                     timestamp=>os:system_time(millisecond)+86400000
-                    },Pvt1)
-                 ),
     #{block:=Block,
       failed:=Failed}=generate_block(
-                        [
-						 {<<"1interchain">>,TX0},
+                        [{<<"1interchain">>,TX0},
                          {<<"2invalid">>,TX1},
                          {<<"3crosschain">>,TX2},
-                         {<<"4crosschain">>,TX3},
-                         {<<"5nosk">>,TX4},
-                         {<<"6sklim">>,TX5},
-                         {<<"7nextday">>,TX6},
-                         {<<"8nofee">>,TX7},
-                         {<<"9nofee">>,TX8}
+                         {<<"4crosschain">>,TX3}
                         ],
                         {1,ParentHash},
                         GetSettings,
                         GetAddr),
-	Success=proplists:get_keys(maps:get(txs,Block)),
-	?assertMatch([{<<"2invalid">>,insufficient_fund},
-				  {<<"5nosk">>,no_sk},
-				  {<<"6sklim">>,sk_limit},
-				  {<<"8nofee">>,{insufficient_fee,2}},
-				  {<<"9nofee">>,insufficient_fund_for_fee}
-				 ], lists:sort(Failed)),
-    ?assertEqual([<<"1interchain">>,<<"3crosschain">>,<<"4crosschain">>,<<"7nextday">>], lists:sort(Success)),
+    ?assertEqual([{<<"2invalid">>,insufficient_fund}], Failed),
     ?assertEqual([<<"3crosschain">>,<<"4crosschain">>],proplists:get_keys(maps:get(tx_proof,Block))),
     ?assertEqual([{<<"4crosschain">>,OurChain+2},{<<"3crosschain">>,OurChain+2}],maps:get(outbound,Block)),
     SignedBlock=block:sign(Block,<<1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1>>),
     file:write_file("tmp/testblk.txt", io_lib:format("~p.~n",[Block])),
     ?assertMatch({true, {_,_}},block:verify(SignedBlock)),
-	lager:info("FSK B ~p",[proplists:get_keys(maps:get(txs,Block))]),
     _=maps:get(OurChain+2,block:outward_mk(maps:get(outbound,Block),SignedBlock)),
 	Block.
 
 %test_getaddr%({_Addr,_Cur}) -> %suitable for inbound tx
-test_getaddr(Addr) ->
-	#{address:=_,block:=_,group:=Grp,type:=public}=naddress:parse(Addr),
+test_getaddr(_Addr) ->
     #{amount => #{
         <<"FTT">> => 110,
-		<<"SK">> => Grp,
         <<"TST">> => 26
        },
       seq => 1,
