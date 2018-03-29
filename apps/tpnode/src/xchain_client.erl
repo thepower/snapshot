@@ -46,18 +46,19 @@ init(_Args) ->
     {ok, State}.
 
 handle_call(state, _From, State) ->
+    lager:notice("state request", []),
     {reply, State, State};
 
 
 handle_call({add_subscribe, Subscribe}, _From, #{subs:=Subs} = State) ->
     AS=add_sub(Subscribe, Subs),
-    lager:notice("xchain client add subscribe ~p: ~p", [Subscribe,AS]),
+    lager:notice("add subscribe ~p: ~p", [Subscribe,AS]),
     {reply, ok, State#{
         subs => AS
     }};
 
 handle_call({connect, Ip, Port}, _From, State) ->
-    lager:notice("xchain client connect to ~p ~p", [Ip, Port]),
+    lager:notice("crosschain connect to ~p ~p", [Ip, Port]),
     {reply, ok, State#{
         conn => connect_remote({Ip, Port})
     }};
@@ -72,49 +73,45 @@ handle_call(peers, _From, #{subs:=Subs} = State) ->
 
 
 handle_call(_Request, _From, State) ->
-    lager:notice("xchain client unknown call ~p", [_Request]),
+    lager:notice("crosschain unknown call ~p", [_Request]),
     {reply, ok, State}.
 
 
 handle_cast(settings, State) ->
-    lager:notice("xchain client reload settings"),
+    lager:notice("reload settings"),
     {noreply, change_settings_handler(State)};
 
-handle_cast({discovery, AnnounceBin}, State) ->
-    lager:notice("xchain client got announce from discovery. We have to relay this announce to all chains"),
-    {noreply, State};
 
 handle_cast(_Msg, State) ->
-    lager:error("xchain client unknown cast ~p", [_Msg]),
+    lager:notice("crosschain unknown cast ~p", [_Msg]),
     {noreply, State}.
 
-
 handle_info({gun_up, ConnPid, http}, State) ->
-    lager:notice("xchain client http up"),
+    lager:notice("crosschain client http up"),
     gun:ws_upgrade(ConnPid, "/"),
     {noreply, State};
 
 handle_info({gun_ws_upgrade, ConnPid, ok, _Headers}, #{subs:=Subs} = State) ->
-    lager:notice("xchain client connection upgraded to websocket"),
+    lager:notice("crosschain client connection upgraded to websocket"),
     {noreply, State#{
         subs => mark_ws_mode_on(ConnPid, Subs)
     }};
 
 handle_info({gun_ws, ConnPid, {close, _, _}}, #{subs:=Subs} = State) ->
-    lager:notice("xchain client got close from server for pid ~p", [ConnPid]),
+    lager:notice("crosschain client got close from server for pid ~p", [ConnPid]),
     {noreply, State#{
         subs => lost_connection(ConnPid, Subs)
     }};
 
 handle_info({gun_ws, ConnPid, {binary, Bin} }, State) ->
-%%    lager:notice("xchain client got ws bin msg: ~p", [Bin]),
+    lager:notice("crosschain client got ws bin msg: ~p", [Bin]),
     try
         NewState = xchain_client_handler:handle_xchain(unpack(Bin), ConnPid, State),
         {noreply, NewState}
     catch
         Ec:Ee ->
             S=erlang:get_stacktrace(),
-            lager:error("xchain client msg parse error ~p:~p",[Ec,Ee]),
+            lager:error("crosschain client parse error ~p:~p",[Ec,Ee]),
             lists:foreach(
                 fun(Se) ->
                     lager:error("at ~p",[Se])
@@ -123,11 +120,11 @@ handle_info({gun_ws, ConnPid, {binary, Bin} }, State) ->
     end;
 
 handle_info({gun_ws, _ConnPid, {text, Msg} }, State) ->
-    lager:error("xchain client got ws text msg: ~p", [Msg]),
+    lager:notice("crosschain client got ws msg: ~p", [Msg]),
     {noreply, State};
 
 handle_info({gun_down, ConnPid, _, _, _, _}, #{subs:=Subs} = State) ->
-    lager:notice("xchain client lost connection for pid: ~p", [ConnPid]),
+    lager:notice("crosschain client lost connection for pid: ~p", [ConnPid]),
     {noreply, State#{
         subs => lost_connection(ConnPid, Subs)
     }};
@@ -162,7 +159,7 @@ handle_info({'DOWN', _Ref, process, Pid, _Reason}, #{subs:=Subs} = State) ->
     }};
 
 handle_info(_Info, State) ->
-    lager:error("xchain client unknown info ~p", [_Info]),
+    lager:notice("crosschain client unknown info ~p", [_Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -191,7 +188,7 @@ make_pings(Subs) ->
 %% TODO: catch gun:open errors here!!!
 connect_remote({Ip, Port} = _Address) ->
     {ok, _} = application:ensure_all_started(gun),
-    lager:info("xchain client connecting to ~p ~p", [Ip, Port]),
+    lager:info("crosschain client connecting to ~p ~p", [Ip, Port]),
     {ok, ConnPid} = gun:open(Ip, Port),
     ConnPid.
 
@@ -236,7 +233,7 @@ mark_ws_mode_on(Pid, Subs) ->
 
 
 make_connections(Subs) ->
-    lager:info("xchain client make connections"),
+    lager:info("make connections"),
     maps:map(
         fun(_Key, Sub) ->
             case maps:is_key(connection, Sub) of
@@ -250,7 +247,7 @@ make_connections(Subs) ->
                         }
                     catch
                         Err:Reason ->
-                            lager:info("xchain client got error while connection to remote xchain: ~p ~p", [Err, Reason]),
+                            lager:info("error while connection to remote xchain: ~p ~p", [Err, Reason]),
                             Sub
                     end;
                 _ ->
@@ -271,7 +268,7 @@ parse_subscribe(#{address:=Ip, port:=Port, channels:=Channels})
     when is_integer(Port) andalso is_list(Channels) ->
     NewChannels = lists:foldl(
         fun(Chan, ChanStorage) when is_binary(Chan) -> maps:put(Chan, 0, ChanStorage);
-           (InvalidChanName, _ChanStorage) -> lager:info("xchain client got invalid chan name: ~p", InvalidChanName)
+           (InvalidChanName, _ChanStorage) -> lager:info("invalid chan name: ~p", InvalidChanName)
         end,
         #{},
         Channels
@@ -283,7 +280,7 @@ parse_subscribe(#{address:=Ip, port:=Port, channels:=Channels})
     };
 
 parse_subscribe(Invalid) ->
-    lager:error("xchain client got invalid subscribe: ~p", [Invalid]),
+    lager:error("invalid subscribe: ~p", [Invalid]),
     throw(invalid_subscribe).
 
 check_empty_subscribes(#{channels:=Channels}=_Sub) ->
@@ -307,16 +304,16 @@ add_sub(Subscribe, Subs) ->
         maps:put(Key, NewSub, Subs)
     catch
         Reason ->
-            lager:error("xchain client can't process subscribe. ~p ~p", [Reason, Subscribe]),
+            lager:error("can't process subscribe. ~p ~p", [Reason, Subscribe]),
             Subs
     end.
 
 subscribe_one_channel(ConnPid, Channel) ->
     % subscribe here
-    lager:info("xhcain client subscribe to ~p channel", [Channel]),
+    lager:info("subscribe to ~p channel", [Channel]),
     Cmd = pack({subscribe, Channel}),
     Result = gun:ws_send(ConnPid, {binary, Cmd}),
-    lager:info("xchain client subscribe result is ~p", [Result]),
+    lager:info("subscribe result is ~p", [Result]),
     1.
 
 make_subscription(Subs) ->
@@ -375,7 +372,7 @@ change_settings_handler(#{chain:=Chain, subs:=Subs} = State) ->
         Chain ->
             State;
         _ ->
-            lager:info("xchain client wiped out all crosschain subscribes"),
+            lager:info("wipe all crosschain subscribes"),
 
             % close all active connections
             maps:fold(
@@ -411,7 +408,7 @@ init_subscribes(Subs) ->
             add_sub(Sub, Acc);
 
             (Invalid, Acc) ->
-                lager:error("xhcain client got invalid crosschain connect term: ~p", Invalid),
+                lager:error("invalid crosschain connect term: ~p", Invalid),
                 Acc
         end, Subs, ConnectIpsList).
 
