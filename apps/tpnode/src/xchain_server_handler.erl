@@ -40,5 +40,4 @@ handle_xchain({subscribe, Channel}) ->
     {subscribed, Channel};
 
 handle_xchain(Cmd) ->
-    lager:info("xchain server got unhandled message from client: ~p", [Cmd]),
     {unhandled, Cmd}.
