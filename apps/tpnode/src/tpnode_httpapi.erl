@@ -33,14 +33,9 @@ h(<<"GET">>, [<<"node">>,<<"status">>], _Req) ->
                 (_,V) -> V
              end, Header1),
     Peers=lists:map(
-            fun(#{addr:=_Addr, auth:=Auth, state:=Sta, authdata:=AD}) ->
+            fun(#{addr:=_Addr, auth:=Auth, state:=Sta}) ->
                     #{auth=>Auth,
-                      state=>Sta,
-					  node=>proplists:get_value(nodeid,AD,null)
-                     };
-			   (#{addr:=_Addr}) ->
-					#{auth=>unknown,
-                      state=>unknown
+                      state=>Sta
                      }
             end, tpic:peers()),
     SynPeers=gen_server:call(synchronizer,peers),
@@ -55,14 +50,8 @@ h(<<"GET">>, [<<"node">>,<<"status">>], _Req) ->
 			hash=>BinPacker(Hash),
 			header=>Header
 		   },
-		  xchain_inbound => try 
-								gen_server:call(xchain_dispatcher,peers)
-							catch _:_ -> #{}
-							end,
-		  xchain_outbound => try 
-								 gen_server:call(crosschain,peers)
-							 catch _:_ -> #{}
-							 end,
+		  xchain_inbound => gen_server:call(xchain_dispatcher,peers),
+		  xchain_outbound => gen_server:call(crosschain,peers),
           tpic_peers=>Peers,
           sync_peers=>SynPeers,
           ver=>list_to_binary(Ver)
@@ -187,6 +176,48 @@ h(<<"GET">>, [<<"settings">>], _Req) ->
     {200,
      #{ result => <<"ok">>,
         settings => Block
+      }
+    };
+
+
+h(<<"POST">>, [<<"benchmark">>,N], _Req) ->
+    Addresses=lists:map(
+        fun(_) ->
+                address:pub2addr(0,crypto:strong_rand_bytes(16))
+        end, lists:seq(1, binary_to_integer(N))),
+    {ok,Config}=application:get_env(tpnode,tpfaucet),
+    Tokens=proplists:get_value(tokens,Config),
+    Coin= <<"FTT">>,
+    #{key:=Key, addr:=Adr}=proplists:get_value(Coin,Tokens,undefined),
+    #{seq:=Seq0}=gen_server:call(blockchain,{get_addr,Adr,Coin}),
+    BinKey=address:parsekey(Key),
+
+    {_,Res}=lists:foldl(fun(Address,{Seq,Acc}) ->
+                                Tx=#{
+                                  amount=>1,
+                                  cur=>Coin,
+                                  extradata=>jsx:encode(#{
+                                               message=> <<"Preved, ", Address/binary>>
+                                              }),
+                                  from=>Adr,
+                                  to=>Address,
+                                  seq=>Seq,
+                                  timestamp=>os:system_time(millisecond)
+                                 },
+                                NewTx=tx:sign(Tx,BinKey),
+                                case txpool:new_tx(NewTx) of
+                                    {ok, TxID} ->
+                                        {Seq+1,
+                                         [#{addr=>Address,tx=>TxID}|Acc]
+                                        };
+                                    {error, Error} ->
+                                        lager:error("Can't make tx: ~p",[Error]),
+                                        {Seq+1,Acc}
+                                end
+                        end,{Seq0+1,[]},Addresses),
+        {200,
+     #{ result => <<"ok">>,
+        address=>Res
       }
     };
 

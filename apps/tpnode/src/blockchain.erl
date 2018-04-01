@@ -170,37 +170,6 @@ handle_call(status, _From,
 handle_call(last, _From, #{lastblock:=L}=State) ->
     {reply, maps:with([child,header,hash],L), State};
 
-handle_call(lastsig, _From, #{myname:=MyName,
-							  chainnodes:=CN,
-							  lastblock:=#{hash:=H,sign:=Sig}
-							 }=State) ->
-	SS=try
-		   lists:foldl(
-			 fun(#{extra:=PL},Acc) ->
-					 case proplists:get_value(pubkey,PL,undefined) of
-						 undefined -> Acc;
-						 BinKey ->
-							 case maps:get(BinKey,CN,undefined) of
-								 undefined -> Acc;
-								 NodeID ->
-									 [NodeID|Acc]
-							 end
-					 end
-			 end,
-			 [],
-			 Sig
-			)
-	   catch _:_ -> []
-	   end,
-    {reply, #{hash=>H,
-			  origin=>MyName,
-			  signed=>SS}, State};
-
-handle_call({is_our_node, PubKey}, _From,
-			#{chainnodes:=CN}=State) ->
-	Res=maps:get(PubKey,CN,false),
-	{reply, Res, State};
-
 handle_call(last_block, _From, #{lastblock:=LB}=State) ->
     {reply, LB, State};
 
@@ -215,10 +184,6 @@ handle_call({get_block,BlockHash}, _From, #{ldb:=LDB,lastblock:=#{hash:=LBH}=LB}
           end,
     {reply, Block, State};
 
-
-handle_call(chainnodes, _From, State) ->
-    #{chainnodes:=CN}=S1=mychain(State),
-    {reply, CN, S1};
 
 handle_call({mysettings, chain}, _From, State) ->
     #{mychain:=MyChain}=S1=mychain(State),
@@ -252,18 +217,6 @@ handle_call({settings,signature}, _From, #{settings:=Settings}=State) ->
 handle_call(state, _From, State) ->
     {reply, State, State};
 
-handle_call(saveset, _From, #{settings:=Settings}=State) ->
-	file:write_file("tmp/settings.dump",
-					io_lib:format("~p.~n",[Settings])),
-    {reply, Settings, State};
-
-handle_call(restoreset, _From, #{ldb:=LDB}=State) ->
-	{ok,[S1]}=file:consult("tmp/settings.dump"),
-	true=is_map(S1),
-	save_sets(LDB, S1),
-	notify_settings(),
-    {reply, S1, State#{settings=>S1}};
-
 handle_call(_Request, _From, State) ->
     {reply, unhandled_call, State}.
 
@@ -273,60 +226,70 @@ handle_cast({new_block, _BlockPayload,  PID},
     {noreply, State};
 
 handle_cast({tpic, Origin, #{null:=<<"pick_block">>,
-                             <<"hash">>:=Hash,
-                             <<"rel">>:=Rel
+                                <<"hash">>:=Hash,
+                                <<"rel">>:=Rel
                             }},
-            #{ldb:=LDB}=State) ->
-    MyRel=case Rel of
-              <<"self">> -> self;
-              <<"pre",_/binary>> -> prev;
-              <<"child">> -> child;
-              _ -> self
-          end,
+    #{ldb:=LDB} = State) ->
+    MyRel = case Rel of
+                <<"self">> -> self;
+                <<"pre", _/binary>> -> prev;
+                <<"child">> -> child;
+                _ -> self
+            end,
 
-    R=case ldb:read_key(LDB, <<"block:",Hash/binary>>, undefined) of
-          undefined -> #{error=>noblock};
-          #{header:=#{}}=Block when MyRel==self ->
-              #{ block => block:pack(Block) };
-          #{header:=#{},child:=Child}=_Block when MyRel==child ->
-              case ldb:read_key(LDB, <<"block:",Child/binary>>, undefined) of
-                  undefined -> #{error=>noblock};
-                  #{header:=#{}}=SBlock ->
-                      #{ block=>block:pack(SBlock) }
-              end;
-          #{header:=#{}}=_Block when MyRel==child ->
-              #{ error=>nochild };
-          #{header:=#{parent:=Parent}}=_Block when MyRel==prev  ->
-              case ldb:read_key(LDB, <<"block:",Parent/binary>>, undefined) of
-                  undefined -> #{error=>noblock};
-                  #{header:=#{}}=SBlock ->
-                      #{ block=>block:pack(SBlock) }
-              end;
-          #{header:=#{}}=_Block when MyRel==prev ->
-              #{ error=>noprev };
-          _ ->
-              #{ error => unknown }
-      end,
+    R = case ldb:read_key(LDB, <<"block:", Hash/binary>>, undefined) of
+            undefined -> #{error=>noblock};
+            #{header:=#{}} = Block when MyRel == self ->
+                #{block => block:pack(Block)};
+            #{header:=#{}, child:=Child} = _Block when MyRel == child ->
+                case ldb:read_key(LDB, <<"block:", Child/binary>>, undefined) of
+                    undefined -> #{error=>noblock};
+                    #{header:=#{}} = SBlock ->
+                        #{block=>block:pack(SBlock)}
+                end;
+            #{header:=#{}} = _Block when MyRel == child ->
+                #{error=>nochild};
+            #{header:=#{parent:=Parent}} = _Block when MyRel == prev ->
+                case ldb:read_key(LDB, <<"block:", Parent/binary>>, undefined) of
+                    undefined -> #{error=>noblock};
+                    #{header:=#{}} = SBlock ->
+                        #{block=>block:pack(SBlock)}
+                end;
+            #{header:=#{}} = _Block when MyRel == prev ->
+                #{error=>noprev};
+            _ ->
+                #{error => unknown}
+        end,
 
-    tpic:cast(tpic,Origin,
-              msgpack:pack(
-                maps:merge(
-                  #{
-                  null=><<"block">>,
-                  req=>#{<<"hash">>=>Hash,
-                         <<"rel">>=>MyRel}
-                 }, R))),
-    {noreply, State};
+    case maps:is_key(block, R) of
+        false ->
+            tpic:cast(tpic, Origin,
+                msgpack:pack(
+                    maps:merge(
+                        #{
+                            null=> <<"block">>,
+                            req=> #{<<"hash">> => Hash,
+                                <<"rel">> => MyRel}
+                        }, R))),
+            {noreply, State};
+
+        true ->
+            #{block := BinBlock} = R,
+            BlockParts = block:split_packet(BinBlock),
+            Map = #{null => <<"block">>, req => #{<<"hash">> => Hash, <<"rel">> => MyRel}},
+            send_block(tpic, Origin, Map, BlockParts),
+            {noreply, State}
+    end;
 
 
-handle_cast({tpic, Origin, #{null:=<<"instant_sync_run">>}},
+handle_cast({tpic, Origin, #{null:=<<"instant_sync_run">>}}, 
             #{settings:=Settings, lastblock:=LastBlock}=State) ->
     lager:info("Starting instant sync source"),
     ledger_sync:run_source(tpic, Origin, LastBlock, Settings),
     {noreply, State};
 
 
-handle_cast({tpic, Origin, #{null:=<<"sync_request">>}},
+handle_cast({tpic, Origin, #{null:=<<"sync_request">>}}, 
             #{lastblock:=#{hash:=Hash,header:=#{height:=Height}},
               mychain:=MyChain
              }=State) ->
@@ -425,7 +388,7 @@ handle_cast({new_block, #{hash:=BlockHash}=Blk, PID}=_Message,
         case block:verify(Blk) of
             false ->
 				T1=erlang:system_time(),
-				file:write_file("tmp/bad_block_"++integer_to_list(maps:get(height,maps:get(header,Blk)))++".txt",
+				file:write_file("tmp/bad_block_"++integer_to_list(maps:get(height,maps:get(header,Blk)))++".txt", 
 								io_lib:format("~p.~n", [Blk])),
                 lager:info("Got bad block from ~p New block ~w arrived ~s, verify (~.3f ms)",
                    [FromNode,maps:get(height,maps:get(header,Blk)),
@@ -534,7 +497,7 @@ handle_cast({new_block, #{hash:=BlockHash}=Blk, PID}=_Message,
                                         try
                                             lager:info("Out to ~b ~p",
                                                        [ChainID,OutBlock]),
-                                            Chid=xchain:pack_chid(ChainID),
+                                            Chid=crosschain:pack_chid(ChainID),
                                             xchain_dispatcher:pub(
                                                Chid,
                                                {outward_block,
@@ -586,7 +549,7 @@ handle_cast({new_block, #{hash:=BlockHash}=Blk, PID}=_Message,
     end;
 
 handle_cast({tpic,Peer,#{null := <<"sync_done">>}},
-            #{ldb:=LDB, settings:=Set,
+            #{ldb:=LDB, settings:=Set, 
               sync:=SyncPeer}=State) when Peer==SyncPeer ->
     %save_bals(LDB, Tbl),
     save_sets(LDB, Set),
@@ -687,7 +650,7 @@ handle_cast({tpic,Peer,#{null := <<"sync_suspend">>,
 handle_cast({tpic, From, Bin}, State) when is_binary(Bin) ->
     case msgpack:unpack(Bin,[]) of
         {ok, Struct} ->
-            lager:debug("Inbound TPIC ~p",[maps:get(null,Struct)]),
+            lager:info("Inbound TPIC ~p",[maps:get(null,Struct)]),
             handle_cast({tpic, From, Struct}, State);
         _Any ->
             lager:info("Can't decode  TPIC ~p",[_Any]),
@@ -740,12 +703,10 @@ handle_info({inst_sync,done,Log}, #{ldb:=LDB}=State) ->
            lager:info("Sync done"),
            lager:notice("Verify settings"),
            CleanState=maps:without([sync,syncblock,syncpeer,syncsettings], State),
-		   SS=maps:get(syncsettings,State),
            %self() ! runsync,
            save_block(LDB, Block, true),
-		   save_sets(LDB, SS),
            {noreply, CleanState#{
-                       settings=>SS,
+                       settings=>maps:get(syncsettings,State),
                        lastblock=>Block,
                        candidates=>#{}
                       }
@@ -766,10 +727,11 @@ handle_info({b2b_sync, Hash}, #{
         [{_,R}] ->
             case maps:is_key(block, R) of
                 false ->
-                    lager:error("No block arrived, broken sync ~p",[R]),
+                    lager:error("No block part arrived, broken sync ~p", [R]),
                     {noreply, State};
                 true ->
-                    #{block:=BinBlock}=R,
+                    #{block := BlockPart} = R,
+                    BinBlock = receive_block(Handler, BlockPart),
                     #{hash:=NewH}=Block=block:unpack(BinBlock),
                     gen_server:cast(self(),{new_block, Block, self()}),
                     case maps:find(child, Block) of
@@ -782,7 +744,7 @@ handle_info({b2b_sync, Hash}, #{
                     end,
                     {noreply, State}
             end;
-        _ ->
+        _ -> 
             erlang:send_after(10000,self(),runsync),
             {noreply, State}
     end;
@@ -791,7 +753,7 @@ handle_info(checksync, #{
 			  lastblock:=#{header:=#{height:=MyHeight},hash:=_MyLastHash}
 			 }=State) ->
 	Candidates=lists:reverse(
-				 tpiccall(<<"blockchain">>,
+				 tpiccall(<<"blockchain">>, 
 						  #{null=><<"sync_request">>},
 						  [last_hash,last_height,chain]
 						 )),
@@ -825,7 +787,7 @@ handle_info(runsync, #{
              }=State) ->
     %State1=run_sync(State),
     Candidates=lists:reverse(
-                 tpiccall(<<"blockchain">>,
+                 tpiccall(<<"blockchain">>, 
                           #{null=><<"sync_request">>},
                           [last_hash,last_height,chain]
                          )),
@@ -888,7 +850,7 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-format_status(_Opt, [_PDict,State]) ->
+format_status(_Opt, [_PDict,State]) -> 
     State#{
       ldb=>handler
      }.
@@ -897,6 +859,40 @@ format_status(_Opt, [_PDict,State]) ->
 %% ------------------------------------------------------------------
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
+
+send_block(TPIC, PeerID, Map, [BlockHead|BlockTail]) when BlockTail =:= [] ->
+    tpic:cast(TPIC, PeerID, msgpack:pack(maps:merge(Map, #{block => BlockHead})));
+send_block(TPIC, PeerID, Map, [BlockHead|BlockTail]) ->
+    tpic:cast(TPIC, PeerID, msgpack:pack(maps:merge(Map, #{block => BlockHead}))),
+    receive
+        {'$gen_cast',{TPIC, PeerID, Bin}} ->
+            case msgpack:unpack(Bin) of
+                {ok, #{null := <<"pick_next_part">>}} ->
+                    send_block(TPIC, PeerID, Map, BlockTail);
+                {error, _} ->
+                    error
+            end;
+        {'$gen_cast', Any} ->
+            lager:info("Unexpected message ~p", [Any])
+    after 30000 ->
+        timeout
+    end.
+
+receive_block(Handler, BlockPart) ->
+    receive_block(Handler, BlockPart, []).
+receive_block(Handler, BlockPart, Acc) ->
+    NewAcc = [BlockPart|Acc],
+    <<Number:32, Length:32, _/binary>> = BlockPart,
+    case length(NewAcc) of
+        Length ->
+            block:glue_packet(NewAcc);
+        _ ->
+            lager:debug("Received block part number ~p out of ~p",[Number, Length]),
+            Response = tpiccall(Handler,  #{null => <<"pick_next_part">>}, [block]),
+            [{_,R}] = Response,
+            #{block := NewBlockPart} = R,
+            receive_block(Handler, NewBlockPart, NewAcc)
+    end.
 
 save_sets(ignore, _Settings) -> ok;
 save_sets(LDB, Settings) ->
@@ -1080,27 +1076,28 @@ notify_settings() ->
     gen_server:cast(mkblock,settings),
     gen_server:cast(blockvote,settings),
     gen_server:cast(synchronizer,settings),
-    gen_server:cast(xchain_client,settings).
+    gen_server:cast(crosschain,settings).
 
 mychain(#{settings:=S}=State) ->
     KeyDB=maps:get(keys,S,#{}),
     NodeChain=maps:get(nodechain,S,#{}),
     PubKey=nodekey:get_pub(),
     lager:info("My key ~s",[bin2hex:dbin2hex(PubKey)]),
-	ChainNodes0=maps:fold(
-				 fun(Name,XPubKey, Acc) ->
-						 maps:put(XPubKey, Name, Acc)
-				 end, #{}, KeyDB),
-    MyName=maps:get(PubKey,ChainNodes0,undefined),
+    MyName=maps:fold(
+             fun(K,V,undefined) ->
+%                     lager:info("Compare ~p with ~p", [V,PubKey]),
+                     if V==PubKey ->
+                            K;
+                        true ->
+                            undefined
+                     end;
+                (_,_,Found) ->
+                     Found
+             end, undefined, KeyDB),
     MyChain=maps:get(MyName,NodeChain,0),
-	ChainNodes=maps:filter(
-				 fun(_PubKey,Name) ->
-				 maps:get(Name, NodeChain, 0) == MyChain
-				 end, ChainNodes0),
-    lager:info("My name ~p chain ~p ournodes ~p",[MyName,MyChain,maps:values(ChainNodes)]),
+%    lager:info("My name ~p chain ~p",[MyName,MyChain]),
     maps:merge(State,
                #{myname=>MyName,
-				 chainnodes=>ChainNodes,
                  mychain=>MyChain
                 }).
 
@@ -1108,8 +1105,8 @@ tpiccall(Handler, Object, Atoms) ->
     Res=tpic:call(tpic, Handler, msgpack:pack(Object)),
     lists:filtermap(
       fun({Peer, Bin}) ->
-              case msgpack:unpack(Bin, [{known_atoms, Atoms}]) of
-                  {ok, Decode} ->
+              case msgpack:unpack(Bin, [{known_atoms, Atoms}]) of 
+                  {ok, Decode} -> 
                       {true, {Peer, Decode}};
                   _ -> false
               end
