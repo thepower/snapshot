@@ -114,7 +114,43 @@ test_xchain_tx(ToChain) ->
     tx:unpack(NewTx),
     txpool:new_tx(NewTx) 
     }.
- 
+
+test_add_endless(Address,Cur) ->
+    PrivKey=nodekey:get_priv(),
+    MyChain=blockchain:chain(),
+    true=is_integer(MyChain),
+    Patch=settings:sign(
+            settings:dmp(
+              settings:mp(
+                [
+                 #{t=>set,p=>[current,endless,Address,Cur], v=>true}
+                ])),
+      PrivKey),
+    io:format("PK ~p~n",[settings:verify(Patch)]),
+    {Patch,
+    gen_server:call(txpool, {patch, Patch})
+    }.
+
+test_fee_settings() ->
+    PrivKey=nodekey:get_priv(),
+    MyChain=blockchain:chain(),
+    true=is_integer(MyChain),
+    Patch=settings:sign(
+            settings:dmp(
+              settings:mp(
+                [
+                 #{t=>set,p=>[current,fee,params,<<"feeaddr">>], v=><<160,0,0,0,0,0,0,1>>},
+                 #{t=>set,p=>[current,fee,params,<<"tipaddr">>], v=><<160,0,0,0,0,0,0,2>>},
+                 #{t=>set,p=>[current,fee,params,<<"notip">>], v=>0},
+                 #{t=>set,p=>[current,fee,<<"FTT">>,<<"base">>], v=>trunc(1.0e7)},
+                 #{t=>set,p=>[current,fee,<<"FTT">>,<<"baseextra">>], v=>64},
+                 #{t=>set,p=>[current,fee,<<"FTT">>,<<"kb">>], v=>trunc(1.0e9)}
+                ])),
+      PrivKey),
+    io:format("PK ~p~n",[settings:verify(Patch)]),
+    {Patch,
+    gen_server:call(txpool, {patch, Patch})
+    }.
 
 test_alloc_block() ->
     PrivKey=nodekey:get_priv(),
@@ -156,32 +192,6 @@ test_sign_patch() ->
     io:format("PK ~p~n",[settings:verify(Patch)]),
     {Patch,
     gen_server:call(txpool, {patch, Patch})}.
-
-outbound_tx() ->
-    Pvt=address:parsekey(<<"5Kh9DfFypQNSd1GbGYNuHXsuaRcKVfcAWkrEQDJUMEZfi7yrvzm">>),
-    Pub=tpecdsa:secp256k1_ec_pubkey_create(Pvt, false),
-    From=address:pub2caddr(0,Pub),
-
-    Pvt2=address:parsekey(<<"5JNg2WK9RUjxDranifcaTHrk5nGDnb1Pp2yq9Xfz3Arm6g93uCA">>),
-    Pub2=tpecdsa:secp256k1_ec_pubkey_create(Pvt2, true),
-    To=address:pub2caddr(1,Pub2),
-
-    Cur= <<"FTT">>,
-    Tx=#{
-      amount=>3.34,
-      seq=>19,
-      cur=>Cur,
-      extradata=>jsx:encode(#{
-                   message=><<"send pi ftt">>
-                  }),
-      from=>From,
-      to=>To,
-      timestamp=>os:system_time(millisecond)
-     },
-    NewTx=tx:sign(Tx,Pvt),
-    %tx:unpack(NewTx).
-    txpool:new_tx(NewTx).
-
 
 getpvt(Id) ->
     {ok, Pvt}=file:read_file(<<"tmp/addr",(integer_to_binary(Id))/binary,".bin">>),
