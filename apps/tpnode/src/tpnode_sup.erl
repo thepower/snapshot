@@ -28,9 +28,6 @@ init([]) ->
 	code:ensure_loaded(tpic_checkauth),
     tpnode:reload(),
 
-    % we'll register this services-without-pid on discovery starting up
-    MandatoryServices = [ api ],
-
     {ok, TPIC0}=application:get_env(tpnode, tpic),
     TPIC=TPIC0#{
            ecdsa=>tpecdsa:generate_priv(),
@@ -43,7 +40,7 @@ init([]) ->
              <<"blockchain">>=>blockchain
             }
           },
-		Discovery=#{name=>discovery, services=>MandatoryServices},
+		Discovery=#{pid=>discovery, name=>discovery},
     {ok, { {one_for_one, 5, 10},
            [
             { rdb_dispatcher, {rdb_dispatcher, start_link, []}, permanent, 5000, worker, []},

@@ -73,7 +73,6 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
-
 parse_address(#{address:=Ip, port:=Port, proto:=Proto} = _Address) ->
     {Ip, Port, Proto};
 
@@ -90,10 +89,11 @@ filter_local_addresses(Peers) ->
     LocalAddressFilter = fun({Ip, Port} = _Address) ->
         IsLocalAddress = lists:any(
             fun(#{address := LocalIp,
-                port := LocalPort} = _LocalAddress) ->
-                (
-                  Ip == LocalIp andalso
-                  Port == LocalPort
+                port := LocalPort,
+                proto := Proto} = _LocalAddress) ->
+                (Ip == LocalIp andalso
+                    Port == LocalPort andalso
+                    (Proto == tpic orelse Proto == <<"tpic">>)
                 );
                 (InvalidLocalAddress) ->
                     lager:info("invalid local address, skip it: ~p",
@@ -134,7 +134,12 @@ renew_peers(Peers) when is_list(Peers) ->
     gen_server:call(tpic, {add_peers, Peers}).
 
 register_node() ->
-    gen_server:call(discovery, {register, <<"tpicpeer">>, self(), #{}}).
+    Options = #{
+        filter => #{
+            proto => tpic   % announce our addresses with proto tpic only
+        }
+    },
+    gen_server:call(discovery, {register, <<"tpicpeer">>, self(), Options}).
 
 
 %% ---------------
