@@ -580,11 +580,7 @@ handle_cast({new_block, #{hash:=BlockHash}=Blk, PID}=_Message,
                   {noreply, State#{
                               prevblock=> NewLastBlock,
                               lastblock=> MBlk,
-                              settings=>if Sets==Sets1 -> 
-                                             Sets;
-                                           true ->
-                                             chainsettings:settings_to_ets(Sets1)
-                                        end,
+                              settings=>chainsettings:settings_to_ets(Sets1),
                               candidates=>#{}
                              }
                   }
