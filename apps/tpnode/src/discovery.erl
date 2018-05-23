@@ -117,7 +117,6 @@ handle_call({get_config, Key, Default}, _From, State) ->
 handle_call({set_config, Key, Value}, _From, State) ->
     {reply, ok, set_config(Key, Value, State)};
 
-%% register Pid as new local service with name ServiceName
 handle_call({register, ServiceName, Pid}, _From, #{local_services:=Dict} = State) ->
     {reply, ok, State#{
         local_services => register_service(ServiceName, Pid, Dict)
@@ -128,21 +127,18 @@ handle_call({register, ServiceName, Pid, Options}, _From, #{local_services:=Dict
         local_services => register_service(ServiceName, Pid, Dict, Options)
     }};
 
-%% remove registration for all local services with pid Pid
-handle_call({unregister, Pid}, _From, #{local_services:=LocalDict} = State) when is_pid(Pid) ->
+handle_call({unregister, Pid}, _From, #{local_services:=Dict} = State) when is_pid(Pid) ->
     lager:debug("Unregister local service with pid ~p", [Pid]),
     {reply, ok, State#{
-        local_services => delete_service(Pid, LocalDict)
+        local_services => delete_service(Pid, Dict)
     }};
 
-%% remove registration for local serivce with name Name
 handle_call({unregister, Name}, _From, #{local_services:=Dict} = State) when is_binary(Name) ->
     lager:debug("Unregister local service with name ~p", [Name]),
     {reply, ok, State#{
         local_services => delete_service(Name, Dict)
     }};
 
-%% get pid for local service with name Name
 handle_call({get_pid, Name}, _From, #{local_services:=Dict} = State) when is_binary(Name) ->
     lager:debug("Get pid for local service with name ~p", [Name]),
     Reply = case find_service(Name, Dict) of
@@ -154,7 +150,6 @@ handle_call({get_pid, Name}, _From, #{local_services:=Dict} = State) when is_bin
 handle_call({lookup, Pred}, _From, State) when is_function(Pred) ->
     {reply, query(Pred, State), State};
 
-%% get list of ip and port for service with name Name (local and remote)
 handle_call({lookup, Name}, _From, State) ->
     {reply, query(Name, State), State};
 
@@ -174,7 +169,7 @@ handle_cast(make_announce, #{local_services:=Dict} = State) ->
 
 
 handle_cast({got_announce, AnnounceBin}, State) ->
-    lager:debug("Got service announce ~p", [AnnounceBin]),
+%%    lager:debug("Got service announce ~p", [AnnounceBin]),
     try
         MaxTtl = get_config(intrachain_ttl, 120, State),
 
@@ -233,14 +228,8 @@ handle_info(make_announce, #{announcetimer:=Timer} = State) ->
         local_services:=Dict,
         announce_interval:=AnnounceInterval} = State,
 
-    OurChain = blockchain:chain(),
-    if
-        OurChain =:= 0 ->
-            lager:debug("Skip local services announce because of our chain is 0");
-        true ->
-            lager:debug("Make local services announce (timer)"),
-            make_announce(Dict, State)
-    end,
+    lager:debug("Make local services announce (timer)"),
+    make_announce(Dict, State),
 
     {noreply, State#{
         announcetimer => erlang:send_after(AnnounceInterval * 1000, self(), make_announce)
@@ -325,8 +314,9 @@ is_local_service(#{nodeid:=RemoteNodeId} = _Announce) ->
     MyNodeId = nodekey:node_id(),
     MyNodeId =:= RemoteNodeId;
 
-is_local_service(#{<<"nodeid">>:=RemoteNodeId} = Announce) ->
-    is_local_service(Announce#{nodeid => RemoteNodeId});
+is_local_service(#{<<"nodeid">>:=RemoteNodeId} = _Announce) ->
+    MyNodeId = nodekey:node_id(),
+    MyNodeId =:= RemoteNodeId;
 
 is_local_service(_Announce) ->
     false.
@@ -404,9 +394,10 @@ make_announce(#{names:=Names} = _Dict, State) ->
 
 % --------------------------------------------------------
 
-find_service(Pid, #{pids:=PidsDict}) when is_pid(Pid) ->
+
+find_service(Pid, #{pids:=PidDict}) when is_pid(Pid) ->
     lager:debug("find service by pid ~p", [Pid]),
-    maps:find(Pid, PidsDict);
+    maps:find(Pid, PidDict);
 
 find_service(Name, #{names:=NamesDict}) when is_binary(Name) ->
     lager:debug("find service by name ~p", [Name]),
@@ -461,40 +452,6 @@ register_service(Name0, Pid, #{names:=NameDict, pids:=PidDict} = _Dict, Options)
 delete_service(nopid, Dict) ->
     Dict;
 
-delete_service(Pid, #{pids:=PidsDict, names:=NamesDict} = Dict) when is_pid(Pid) ->
-%%    lager:debug("deleting service by pid ~p", [Pid]),
-    NewNames = maps:filter(
-        fun(_Name, #{pid := Pid1}=Record) when Pid==Pid1 ->
-%%            lager:debug("found service ~p with pid ~p", [_Name, Pid]),
-            case maps:get(monitor, Record, not_found) of
-                not_found ->
-%%                    lager:debug("no monitor ref for pid ~p", [Pid]),
-                    skip;
-                MonitorRef ->
-                    lager:debug("demonitor for pid ~p (service ~p)", [Pid, _Name]),
-                    demonitor(MonitorRef)
-            end,
-            false;
-        (_Name, _Record) ->
-            true
-        end,
-        NamesDict),
-    NewPids = maps:remove(Pid, PidsDict),
-    Dict#{
-        pids => NewPids,
-        names => NewNames
-    };
-
-
-%%    case find_service(Pid, Dict) of
-%%        {ok, Name} ->
-%%            lager:debug("we found name ~p for pid ~p", [Name, Pid]),
-%%            delete_service(Name, Dict);
-%%        error ->
-%%            lager:debug("try to delete service with unexisting pid ~p", [Pid]),
-%%            Dict
-%%    end;
-
 delete_service(Name, #{pids:=PidsDict, names:=NamesDict} = Dict) when is_binary(Name) ->
     case find_service(Name, Dict) of
         {ok, #{pid := nopid}} ->
@@ -509,6 +466,19 @@ delete_service(Name, #{pids:=PidsDict, names:=NamesDict} = Dict) when is_binary(
             };
         Invalid ->
             lager:debug("try to delete service with unexisting name ~p, result ~p", [Name, Invalid]),
+            Dict
+    end;
+
+
+delete_service(nopid, Dict) ->
+    Dict;
+
+delete_service(Pid, Dict) when is_pid(Pid) ->
+    case find_service(Pid, Dict) of
+        {ok, Name} ->
+            delete_service(Name, Dict);
+        error ->
+            lager:debug("try to delete service with unexisting pid ~p", [Pid]),
             Dict
     end;
 
@@ -798,7 +768,7 @@ split_bin_to_sign_and_data(Bin) ->
 % --------------------------------------------------------
 
 pack(Message) ->
-    PrivKey = nodekey:get_priv(),
+    PrivKey=nodekey:get_priv(),
     Packed = msgpack:pack(Message),
     Hash = crypto:hash(sha256, Packed),
     Sign = bsig:signhash(
