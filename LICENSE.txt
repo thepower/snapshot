@@ -1,6 +1,6 @@
 _______________________________
 "ThePower.io". 
-Copyright (C) 2018 Mihaylenko Maxim, Belousov Igor
+Copyright (C) 2018 Mikhaylenko Maxim, Belousov Igor
 
 This program is not free software; you can not redistribute it and/or
 modify it in accordance the following terms and conditions, 
