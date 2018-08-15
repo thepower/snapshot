@@ -3,25 +3,25 @@
 
 Here is a list of main modules with short description:
 
- - *tpecdsa.erl* - secp256k1 cryptography primitives 
- - *naddress.erl* - Address format, encoder, parser, constructor tx.erl - transaction constructor, packer, unpacker, verifier 
+ - *tpecdsa.erl* - secp256k1 cryptography primitives
+ - *naddress.erl* - Address format, encoder, parser, constructor tx.erl - transaction constructor, packer, unpacker, verifier
  - *txpool.erl* - pool of transactions ledger.erl - ledger (chain's accounts keeper)
- - *ledger_sync.erl* - synchronization of ledgers 
- - *bal.erl* - ledger item (individual account), constructor, packer, unpacker 
- - *block.erl* - block manipulation functions 
- - *mkblock.erl* - block constructor 
- - *blockvote.erl* - collector of votes for block 
- - *blockchain.erl* - block chain tracker 
- - *bsig.erl* - block signature packer 
- - *chainsettings.erl* - API for chain's settings manipulating 
+ - *ledger_sync.erl* - synchronization of ledgers
+ - *bal.erl* - ledger item (individual account), constructor, packer, unpacker
+ - *block.erl* - block manipulation functions
+ - *mkblock.erl* - block constructor
+ - *blockvote.erl* - collector of votes for block
+ - *blockchain.erl* - block chain tracker
+ - *bsig.erl* - block signature packer
+ - *chainsettings.erl* - API for chain's settings manipulating
  - *synchronizer.erl* - chain's time synchronizer
  - *xchain** - set of modules for cross chain blocks passing
 
 _______________________________
-**"ThePower.io"** 
-*Copyright (C) 2018 Mihaylenko Maxim, Belousov Igor
+**"ThePower.io"**
+*Copyright (C) 2018 Mikhaylenko Maxim, Belousov Igor
 This program is not free software; you can not redistribute it and/or
-modify it in accordance the following terms and conditions,* 
+modify it in accordance the following terms and conditions,*
 _______________________________
 
 TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
@@ -34,7 +34,7 @@ TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
 
 3. You may not modify your copy or copies of the Program or any portion of it, thus forming a work based on the Program, and copy and distribute such modifications or work.
 
-4. You may not copy, modify, sublicense, or distribute the Program in object code or executable form. Any attempt to copy, modify, sublicense or distribute the Program is void, and will automatically terminate your rights under this License. 
+4. You may not copy, modify, sublicense, or distribute the Program in object code or executable form. Any attempt to copy, modify, sublicense or distribute the Program is void, and will automatically terminate your rights under this License.
 
 NO WARRANTY
 
