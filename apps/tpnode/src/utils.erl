@@ -46,28 +46,52 @@
 %%%
 %%% END OF TERMS AND CONDITIONS
 
--module(ldb).
--export([put_key/3, read_key/3, del_key/2, open/1]).
+-module(utils).
 
-open(Path) ->
-    gen_server:call(rdb_dispatcher,
-                                {open, Path, [{create_if_missing, true}]}).
+-export([make_binary/1, make_list/1, apply_macro/2]).
 
-read_key(DB, Key, Default) when is_binary(Key) ->
-    case rocksdb:get(DB, Key, []) of
-        not_found -> Default;
-        {ok, Bin} ->
-            binary_to_term(Bin)
-    end;
-read_key(_DB, Key, _Default) ->
-    lager:error("LDB read_key: key must be binary ~p", [Key]),
-    throw({non_binary_key, Key}).
 
-put_key(DB, Key, Value) when is_binary(Key) ->
-    rocksdb:put(DB, Key, term_to_binary(Value), []);
-put_key(_DB, Key, _Value) ->
-    lager:error("LDB put_key: key must be binary ~p", [Key]),
-    throw({non_binary_key, Key}).
+%% -------------------------------------------------------------------------------------
 
-del_key(DB, Key) ->
-    rocksdb:delete(DB, Key, []).
+make_binary(Arg) when is_binary(Arg) ->
+  Arg;
+
+make_binary(Arg) when is_list(Arg) ->
+  list_to_binary(Arg);
+
+make_binary(Arg) when is_atom(Arg) ->
+  atom_to_binary(Arg, utf8);
+
+make_binary(_Arg) ->
+  throw(badarg).
+
+
+%% -------------------------------------------------------------------------------------
+
+make_list(Arg) when is_list(Arg) ->
+  Arg;
+
+make_list(Arg) when is_binary(Arg) ->
+  binary_to_list(Arg);
+
+make_list(Arg) when is_atom(Arg) ->
+  atom_to_list(Arg);
+
+make_list(_Arg) ->
+  throw(badarg).
+
+
+%% -------------------------------------------------------------------------------------
+
+apply_macro(MapWithMacro, Dict) when is_map(MapWithMacro) andalso is_map(Dict) ->
+  Worker =
+    fun(DictKey, DictValue, SrcMap) ->
+      maps:map(
+        fun(_K, V) ->
+          case V of
+            DictKey -> DictValue;
+            _ -> V
+          end
+        end, SrcMap)
+    end,
+  maps:fold(Worker, MapWithMacro, Dict).

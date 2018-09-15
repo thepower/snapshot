@@ -67,7 +67,8 @@
          start_link/1,
          put/1, put/2,
          check/1, check/2,
-		 deploy4test/2,
+         deploy4test/2,
+         get/2,
          get/1, restore/2, tpic/2]).
 
 %% ------------------------------------------------------------------
@@ -98,8 +99,17 @@ put(KVS, Block) when is_list(KVS) ->
 check(KVS) when is_list(KVS) ->
     gen_server:call(?SERVER, {check, KVS}).
 
+check(Pid, KVS) when is_pid(Pid), is_list(KVS) ->
+    gen_server:call(Pid, {check, KVS});
+
 check(KVS, Block) when is_list(KVS) ->
     gen_server:call(?SERVER, {check, KVS, Block}).
+
+get(Pid, Address) when is_binary(Address) ->
+    gen_server:call(Pid, {get, Address});
+
+get(Pid, KS) when is_list(KS) ->
+    gen_server:call(Pid, {get, KS}).
 
 get(Address) when is_binary(Address) ->
     gen_server:call(?SERVER, {get, Address});
@@ -244,9 +254,14 @@ handle_call({Action, KVS0, BlockID}, _From, #{db:=DB, mt:=MT}=State) when
     %lager:info("KVS0 ~p", [KVS0]),
     %lager:info("KVS1 ~p", [KVS]),
 
-    MT1=gb_merkle_trees:balance(
+    MT1=try gb_merkle_trees:balance(
           lists:foldl(fun applykv/2, MT, KVS)
-         ),
+         )
+        catch Ec:Ee ->
+                S=erlang:get_stacktrace(),
+                lager:error("Bad KV arrived to ~p ledger: ~p",[Action, KVS0]),
+                erlang:raise(Ec,Ee,S)
+        end,
     Res={ok, gb_merkle_trees:root_hash(MT1)},
     {reply, Res,
      case Action of
@@ -255,9 +270,24 @@ handle_call({Action, KVS0, BlockID}, _From, #{db:=DB, mt:=MT}=State) when
              {ok, Batch} = rocksdb:batch(),
              TR=lists:foldl(
                   fun({K, V}, Total) ->
-                          ok=rocksdb:batch_put(Batch, K, term_to_binary(V)),
+                          ok=rocksdb:batch_put(Batch, K,
+                                               term_to_binary(
+                                                 maps:remove(ublk,V)
+                                                )
+                                              ),
                           if BlockID == undefined ->
                                  Total+1;
+                             BlockID == ublk ->
+                               case maps:is_key(ublk, V) of
+                                 true ->
+                                   UBlk=maps:get(ublk,V),
+                                   ok=rocksdb:batch_put(Batch,
+                                                        <<"lb:", K/binary>>,
+                                                        UBlk),
+                                   Total+2;
+                                 false ->
+                                   Total+1
+                               end;
                              true ->
                                  ok=rocksdb:batch_put(Batch,
                                                       <<"lb:", K/binary>>,
@@ -268,6 +298,7 @@ handle_call({Action, KVS0, BlockID}, _From, #{db:=DB, mt:=MT}=State) when
                   0, KVS),
              ?assertEqual(TR, rocksdb:batch_count(Batch)),
              if BlockID == undefined -> ok;
+                BlockID == ublk -> ok;
                 true ->
                     ok=rocksdb:batch_put(Batch,
                                          <<"lastblk">>,
@@ -367,11 +398,12 @@ deploy4test(LedgerInit, TestFun) ->
 					 {ok, P1}=rdb_dispatcher:start_link(),
 					 P1
 			 end,
-	Ledger=case whereis(ledger) of
+	Ledger=case whereis(ledger4test) of
 			   P when is_pid(P) -> false;
 			   undefined ->
 				   {ok, P}=ledger:start_link(
-							[{filename, "db/ledger_txtest"}]
+							[{filename, "db/ledger_txtest"},
+               {name, ledger4test}]
 						   ),
 				   gen_server:call(P, '_flush'),
 				   gen_server:call(P, {put, LedgerInit}),
@@ -379,7 +411,7 @@ deploy4test(LedgerInit, TestFun) ->
 		   end,
 
 	Res=try
-			TestFun()
+			TestFun(Ledger)
 		after
 				  if Ledger == false -> ok;
 					 true -> gen_server:stop(Ledger, normal, 3000)
@@ -449,7 +481,6 @@ drop_db(#{args:=Args}) ->
     file:del_dir(DBPath).
 
 open_db(#{args:=Args}) ->
-    filelib:ensure_dir("db/"),
     DBPath=proplists:get_value(filename,
                                  Args,
                                  ("db/ledger_" ++ atom_to_list(node()))

@@ -15,7 +15,7 @@
 %%% 1. You can use this Program only in case of personal non-commercial use.
 %%%
 %%% 2. You may not copy and distribute copies of the Program and Program's source
-%%% code as you receive it.Mikhaylenko
+%%% code as you receive it.
 %%%
 %%% 3. You may not modify your copy or copies of the Program or any portion of it,
 %%% thus forming a work based on the Program, and copy and distribute such

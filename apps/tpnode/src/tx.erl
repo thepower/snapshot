@@ -48,21 +48,28 @@
 
 -module(tx).
 
--export([get_ext/2, set_ext/3, sign/2, verify/1, pack/1, unpack/1]).
--export([txlist_hash/1, rate/2, mergesig/2, verify1/1, mkmsg/1]).
+-export([get_ext/2, set_ext/3, sign/2, verify/1, verify/2, pack/1, unpack/1]).
+-export([txlist_hash/1, rate/2, mergesig/2]).
+-export([encode_purpose/1, decode_purpose/1, encode_kind/2, decode_kind/1,
+         construct_tx/1,construct_tx/2, get_payload/2]).
+-export([hashdiff/1,upgrade/1]).
 
--ifndef(TEST).
--define(TEST, 1).
--endif.
+-include("apps/tpnode/include/tx_const.hrl").
 
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
--endif.
-
-mergesig(#{sig:=S1}=Tx1, #{sig:=S2}) ->
+mergesig(#{sig:=S1}=Tx1, #{sig:=S2}) when is_map(S1), is_map(S2)->
   Tx1#{sig=>
        maps:merge(S1, S2)
-      }.
+      };
+
+mergesig(#{sig:=S1}=Tx1, #{sig:=S2}) when is_list(S1), is_list(S2)->
+  throw('fixme'),
+  Tx1#{sig=>
+       maps:merge(S1, S2)
+      };
+
+mergesig(Tx1, Tx2) ->
+  file:write_file("tmp/merge1.txt", io_lib:format("~p.~n~p.~n", [Tx1,Tx2])),
+  Tx1.
 
 checkaddr(<<Ia:64/big>>) -> {true, Ia};
 checkaddr(_) -> false.
@@ -100,486 +107,436 @@ set_ext(K, V, Tx) ->
     extdata=>maps:put(K, V, Ed)
    }.
 
-mkmsg(#{ from:=From,
-         deploy:=VMType,
-         code:=NewCode,
-         seq:=Seq,
-         timestamp:=Timestamp
-       }=Tx) ->
-  if is_binary(From) -> ok;
-     true -> throw('non_bin_addr_from')
-  end,
-  if is_binary(VMType) -> ok;
-     true -> throw('non_bin_vmtype')
-  end,
-  if is_binary(NewCode) -> ok;
-     true -> throw('non_bin_code')
-  end,
-  TB=case maps:is_key(state, Tx) of
-       true ->
-         State=maps:get(state, Tx),
-         if is_binary(State) -> ok;
-            true -> throw('non_bin_state')
-         end,
-         [
-          "deploy",
-          From,
-          Timestamp,
-          Seq,
-          VMType,
-          NewCode,
-          State
-         ];
-       false ->
-         [
-          "deploy",
-          From,
-          Timestamp,
-          Seq,
-          VMType,
-          NewCode
-         ]
-     end,
-  msgpack:pack(TB);
 
-mkmsg(#{ from:=From, amount:=Amount,
-         cur:=Currency, to:=To,
-         seq:=Seq, timestamp:=Timestamp
-       }=Tx) ->
-  %{ToValid, _}=checkaddr(To),
-  %if not ToValid ->
-  %       throw({invalid_address, to});
-  %   true -> ok
-  %end,
+-spec to_list(Arg :: binary() | list()) -> list().
 
-  case maps:is_key(outbound, Tx) of
-    true ->
-      lager:notice("MKMSG FIXME: save outbound flag in tx");
-    false -> ok
-  end,
-  Append=maps:get(extradata, Tx, <<"">>),
-  if is_binary(From) -> ok;
-     true -> throw('non_bin_addr_from')
-  end,
-  if is_binary(To) -> ok;
-     true -> throw('non_bin_addr_to')
-  end,
+to_list(Arg) when is_list(Arg) ->
+  Arg;
+to_list(Arg) when is_binary(Arg) ->
+  binary_to_list(Arg).
 
-  msgpack:pack([
-                "tx",
-                From,
-                To,
-                trunc(Amount),
-                if is_list(Currency) -> Currency;
-                   is_binary(Currency) -> binary_to_list(Currency)
-                end,
-                Timestamp,
-                Seq,
-                if is_list(Append) -> Append;
-                   is_binary(Append) -> binary_to_list(Append)
-                end
-               ]);
+to_binary(Arg) when is_binary(Arg) ->
+  Arg;
+to_binary(Arg) when is_list(Arg) ->
+  list_to_binary(Arg).
 
-mkmsg(Unknown) ->
-  throw({unknown_tx_type, Unknown}).
+pack_body(Body) ->
+  msgpack:pack(Body,[{spec,new},{pack_str, from_list}]).
+
+construct_tx(Any) ->
+  construct_tx(Any,[]).
+
+construct_tx(#{
+  ver:=2,
+  kind:=patch,
+  patches:=Patches
+ }=Tx0,_Params) ->
+  Tx=maps:with([ver,txext,patches],Tx0),
+  E0=#{
+    "k"=>encode_kind(2,patch),
+    "e"=>maps:get(txext, Tx, #{}),
+    "p"=>Patches
+   },
+  Tx#{
+    patches=>settings:dmp(settings:mp(Patches)),
+    kind=>patch,
+    body=>pack_body(E0),
+    sig=>[]
+   };
 
 
-sign(#{
-  from:=From
- }=Tx, PrivKey) ->
-  Pub=tpecdsa:secp256k1_ec_pubkey_create(PrivKey, true),
-  case checkaddr(From) of
-    {true, _IAddr} ->
-      ok;
+construct_tx(#{
+  ver:=2,
+  kind:=register,
+  t:=Timestamp,
+  keys:=PubKeys
+ }=Tx0,Params) ->
+  Tx=maps:with([ver,t,txext],Tx0),
+  Keys1=iolist_to_binary(lists:sort(PubKeys)),
+  KeysH=crypto:hash(sha256,Keys1),
+  E0=#{
+    "k"=>encode_kind(2,register),
+    "t"=>Timestamp,
+    "e"=>maps:get(txext, Tx, #{}),
+    "h"=>KeysH
+   },
+
+  InvBody=case Tx0 of
+            #{inv:=Invite} ->
+              E0#{"inv"=>crypto:hash(sha256,Invite)};
+            _ ->
+              E0
+          end,
+
+  PowBody=case proplists:get_value(pow_diff,Params) of
+            undefined -> InvBody;
+            I when is_integer(I) ->
+              mine_sha512(InvBody, 0, I)
+          end,
+
+  case Tx0 of
+    #{inv:=Invite1} ->
+      maps:remove(keys,
+                  Tx0#{
+                    inv=>Invite1,
+                    kind=>register,
+                    body=>pack_body(PowBody),
+                    keysh=>KeysH,
+                    sig=>[]
+                   });
     _ ->
-      throw({invalid_address, from})
-  end,
+      maps:remove(keys,
+                  Tx0#{
+                    kind=>register,
+                    body=>pack_body(PowBody),
+                    keysh=>KeysH,
+                    sig=>[]
+                   })
+  end;
 
-  TxBin=mkmsg(Tx),
-  {ok, [MType|LTx]} = msgpack:unpack(TxBin),
+construct_tx(#{
+  ver:=2,
+  kind:=generic,
+  from:=F,
+  to:=To,
+  t:=Timestamp,
+  seq:=Seq,
+  payload:=Amounts
+ }=Tx0,_Params) ->
+  Tx=maps:with([ver,from,to,t,seq,payload,call,txext],Tx0),
+  A1=lists:map(
+       fun(#{amount:=Amount, cur:=Cur, purpose:=Purpose}) when
+             is_integer(Amount), is_binary(Cur) ->
+           [encode_purpose(Purpose), to_list(Cur), Amount]
+       end, Amounts),
+  Ext=maps:get(txext, Tx, #{}),
+  true=is_map(Ext),
+  E0=#{
+    "k"=>encode_kind(2,generic),
+    "f"=>F,
+    "to"=>To,
+    "t"=>Timestamp,
+    "s"=>Seq,
+    "p"=>A1,
+    "e"=>Ext
+   },
+  {E1,Tx1}=case maps:find(call,Tx) of
+             {ok, #{function:=Fun,args:=Args}} when is_binary(Fun),
+                                                    is_list(Args) ->
+               {E0#{"c"=>[Fun,Args]},Tx};
+             _ ->
+               {E0, maps:remove(call, Tx)}
+           end,
+  Tx1#{
+    kind=>generic,
+    body=>msgpack:pack(E1,[{spec,new},{pack_str, from_list}]),
+    sig=>[]
+   }.
 
-  Sig = tpecdsa:secp256k1_ecdsa_sign(TxBin, PrivKey, default, <<>>),
+unpack_body(#{sig:=<<>>}=Tx) ->
+  unpack_body(Tx#{sig:=[]});
 
-  msgpack:pack(
-    maps:merge(
-      #{
-      type => MType,
-      tx => LTx,
-      sig => maps:put(Pub, Sig, maps:get(signature, Tx, #{}) )
-     },
-      maps:with([extdata], Tx))
-   ).
-
-verify1(#{
-  from := _From,
-  sig := HSigs,
-  timestamp := T
- }=Tx) ->
-  Message=mkmsg(Tx),
-  if is_integer(T) ->
-       ok;
-     true ->
-       throw({bad_timestamp, T})
-  end,
-  VerFun=fun(Pub, Sig, {AValid, AInvalid}) ->
-             case tpecdsa:secp256k1_ecdsa_verify(Message, Sig, Pub) of
-               correct ->
-                 {AValid+1, AInvalid};
-               _ ->
-                 {AValid, AInvalid+1}
-             end
-         end,
-  {Valid, Invalid}=maps:fold(
-                     VerFun,
-                     {0, 0}, HSigs),
-
-  case Valid of
-    0 ->
-      bad_sig;
-    N when N>0 ->
-      {ok, Tx#{
-             sigverify=>#{
-               valid=>Valid,
-               invalid=>Invalid
-              }
-            }
-      }
+unpack_body(#{body:=Body}=Tx) ->
+  case msgpack:unpack(Body,[{spec,new},{unpack_str, as_list}]) of
+    {ok,#{"k":=IKind}=B} ->
+      {Ver, Kind}=decode_kind(IKind),
+      unpack_body(Tx#{ver=>Ver, kind=>Kind},B);
+    {error,{invalid_string,_}} ->
+      case msgpack:unpack(Body,[{spec,new},{unpack_str, as_binary}]) of
+        {ok,#{<<"k">>:=IKind}=B0} ->
+          {Ver, Kind}=decode_kind(IKind),
+          B=maps:fold(
+              fun(K,V,Acc) ->
+                  maps:put(unicode:characters_to_list(K),V,Acc)
+              end, #{}, B0),
+          unpack_body(Tx#{ver=>Ver, kind=>Kind},B)
+      end
   end.
 
+unpack_body(#{ ver:=2,
+              kind:=generic
+             }=Tx,
+            #{ "f":=From,
+               "to":=To,
+               "t":=Timestamp,
+               "s":=Seq,
+               "p":=Payload,
+               "e":=Extradata
+             }=Unpacked) ->
+  Amounts=lists:map(
+       fun([Purpose, Cur, Amount]) ->
+         #{amount=>Amount,
+           cur=>to_binary(Cur),
+           purpose=>decode_purpose(Purpose)
+          }
+       end, Payload),
+  Decoded=Tx#{
+    ver=>2,
+    from=>From,
+    to=>To,
+    t=>Timestamp,
+    seq=>Seq,
+    payload=>Amounts,
+    txext=>Extradata
+   },
+  case maps:is_key("c",Unpacked) of
+    false -> Decoded;
+    true ->
+      [Function, Args]=maps:get("c",Unpacked),
+      Decoded#{
+        call=>#{function=>Function, args=>Args}
+       }
+  end;
 
-verify(#{register:=_, type:=register}=Tx) ->
-  {ok, Tx};
+unpack_body(#{ ver:=2,
+              kind:=register
+             }=Tx,
+            #{ "t":=Timestamp,
+               "e":=Extradata,
+               "h":=Hash
+             }=_Unpacked) ->
+  Tx#{
+    ver=>2,
+    t=>Timestamp,
+    keysh=>Hash,
+    txext=>Extradata
+   };
+
+unpack_body(#{ ver:=2,
+              kind:=register
+             }=Tx,
+            #{ "t":=Timestamp,
+               "h":=Hash
+             }=_Unpacked) ->
+  Tx#{
+    ver=>2,
+    t=>Timestamp,
+    keysh=>Hash,
+    txext=>#{}
+   };
+
+unpack_body(#{ ver:=2,
+              kind:=patch
+             }=Tx,
+            #{ "p":=Patches,
+               "e":=Extradata
+             }=_Unpacked) ->
+  Tx#{
+    ver=>2,
+    patches=>Patches,
+    txext=>Extradata
+   };
+
+unpack_body(#{ver:=Ver, kind:=Kind},_Unpacked) ->
+  throw({unknown_ver_or_kind,{Ver,Kind},_Unpacked}).
+
+sign(#{kind:=_Kind,
+       body:=Body,
+       sig:=PS}=Tx, PrivKey) ->
+  Sig=bsig:signhash(Body,[],PrivKey),
+  Tx#{sig=>[Sig|PS]};
+
+sign(Any, PrivKey) ->
+  tx1:sign(Any, PrivKey).
+
+
+-type tx() :: tx2() | tx1().
+-type tx2() :: #{
+        ver:=non_neg_integer(),
+        kind:=atom(),
+        body:=binary(),
+        sig:=list(),
+        sigverify=>#{valid:=integer(),
+                     invalid:=integer()
+                    }
+       }.
+-type tx1() :: #{ 'patch':=binary(), 'sig':=list() }
+| #{ 'type':='register', 'pow':=binary(),
+     'register':=binary(), 'timestamp':=integer() }
+| #{ from := binary(), sig := map(), timestamp := integer() }.
+
+-spec verify(tx()|binary()) ->
+  {ok, tx()} | 'bad_sig'.
+
+verify(Tx) ->
+  verify(Tx, []).
+
+-spec verify(tx()|binary(), ['nocheck_ledger'| {ledger, pid()}]) ->
+  {ok, tx()} | 'bad_sig'.
 
 verify(#{
-  from := From,
-  sig := HSigs,
-  timestamp := T
- }=Tx) ->
-  Message=mkmsg(Tx),
-  if is_integer(T) ->
-       ok;
-     true ->
-       throw({bad_timestamp, T})
-  end,
-
+  kind:=generic,
+  from:=From,
+  body:=Body,
+  sig:=LSigs,
+  ver:=2
+ }=Tx, Opts) ->
   CI=get_ext(<<"contract_issued">>, Tx),
-  {Valid, Invalid}=case checkaddr(From) of
-                     {true, _IAddr} when CI=={ok, From} ->
-                       %contract issued. Check nodes key.
-                       try
-                         maps:fold(
-                           fun(Pub, Sig, {AValid, AInvalid}) ->
-                               case tpecdsa:secp256k1_ecdsa_verify(Message, Sig, Pub) of
-                                 correct ->
-                                   V=chainsettings:is_our_node(Pub) =/= false,
-                                   if V ->
-                                        {AValid+1, AInvalid};
-                                      true ->
-                                        {AValid, AInvalid+1}
-                                   end;
-                                 _ ->
-                                   {AValid, AInvalid+1}
-                               end
-                           end,
-                           {0, 0}, HSigs)
-                       catch _:_ ->
-                               throw(verify_error)
-                       end;
-                     {true, _IAddr} ->
-                       case ledger:get(From) of
-                         #{pubkey:=PK} when is_binary(PK) ->
-                           VerFun=fun(Pub, Sig, {AValid, AInvalid}) ->
-                                      case tpecdsa:secp256k1_ecdsa_verify(Message, Sig, Pub) of
-                                        correct when PK==Pub ->
-                                          {AValid+1, AInvalid};
-                                        _ ->
-                                          {AValid, AInvalid+1}
-                                      end
-                                  end,
-                           maps:fold(
-                             VerFun,
-                             {0, 0}, HSigs);
-                         _ ->
-                           throw({ledger_err, From})
-                       end;
-                     _ ->
-                       throw({invalid_address, from})
-                   end,
+  Res=case checkaddr(From) of
+        {true, _IAddr} when CI=={ok, From} ->
+          %contract issued. Check nodes key.
+          try
+            bsig:checksig(Body, LSigs, 
+                          fun(PubKey,_) ->
+                              chainsettings:is_our_node(PubKey) =/= false
+                          end)
+          catch _:_ ->
+                  throw(verify_error)
+          end;
+        {true, _IAddr} ->
+          VerFun=case lists:member(nocheck_ledger,Opts) of
+                   false ->
+                     LedgerInfo=ledger:get(
+                                  proplists:get_value(ledger,Opts,ledger),
+                                  From),
+                     case LedgerInfo of
+                       #{pubkey:=PK} when is_binary(PK) ->
+                         fun(PubKey, _) ->
+                             PK==PubKey
+                         end;
+                       _ ->
+                         throw({ledger_err, From})
+                     end;
+                   true ->
+                     undefined
+                 end,
+          bsig:checksig(Body, LSigs, VerFun);
+        _ ->
+          throw({invalid_address, from})
+      end,
 
-  case Valid of
-    0 ->
+  case Res of
+    {[], _} ->
       bad_sig;
-    N when N>0 ->
+    {Valid, Invalid} when length(Valid)>0 ->
       {ok, Tx#{
              sigverify=>#{
-               valid=>Valid,
-               invalid=>Invalid
+               valid=>length(Valid),
+               invalid=>Invalid,
+               pubkeys=>bsig:extract_pubkeys(Valid)
               }
             }
       }
   end;
 
-verify(#{patch:=_, sig:=_}=Patch) ->
-  settings:verify(Patch);
+verify(#{
+  kind:=register,
+  body:=Body,
+  sig:=LSigs,
+  ver:=2
+ }=Tx, _Opts) ->
+  Res=bsig:checksig(Body, LSigs),
+  case Res of
+    {0, _} ->
+      bad_sig;
+    {Valid, Invalid} when length(Valid)>0 ->
+      BodyHash=hashdiff(crypto:hash(sha512,Body)),
+      ValidPK=bsig:extract_pubkeys(Valid),
+      Pubs=crypto:hash(sha256,iolist_to_binary(lists:sort(ValidPK))),
+      #{keysh:=H}=unpack_body(Tx),
+      if Pubs==H ->
+           {ok, Tx#{
+                  sigverify=>#{
+                    pow_diff=>BodyHash,
+                    valid=>length(Valid),
+                    invalid=>Invalid,
+                    pubkeys=>ValidPK
+                   }
+                 }
+           };
+         true ->
+           bad_keys
+      end
+  end;
 
-verify(Bin) when is_binary(Bin) ->
+verify(#{
+  kind:=patch,
+  body:=Body,
+  sig:=LSigs,
+  ver:=2
+ }=Tx, _Opts) ->
+  Res=bsig:checksig(Body, LSigs),
+  case Res of
+    {0, _} ->
+      bad_sig;
+    {Valid, Invalid} when length(Valid)>0 ->
+      {ok, Tx#{
+             sigverify=>#{
+               valid=>length(Valid),
+               invalid=>Invalid,
+               pubkeys=>bsig:extract_pubkeys(Valid)
+              }
+            }
+      }
+  end;
+
+verify(Bin, Opts) when is_binary(Bin) ->
   Tx=unpack(Bin),
-  verify(Tx).
+  verify(Tx, Opts);
 
-pack(#{
-  hash:=_,
-  header:=_,
-  sign:=_
- }=Block) ->
-  msgpack:pack(
-    #{
-    type => <<"block">>,
-    block => block:pack(Block)
-   }
-   );
+verify(Struct, Opts) ->
+  tx1:verify(Struct, Opts).
 
-pack(#{
-  patch:=LPatch,
-  sig:=Sigs
- }=Tx) ->
-  %BinPatch=settings:mp(LPatch),
-  msgpack:pack(
-    maps:merge(
-      #{
-      type => <<"patch">>,
-      patch => LPatch,
-      sig => Sigs
+-spec pack(tx()) -> binary().
+
+pack(#{ ver:=2,
+        body:=Bin,
+        sig:=PS}=Tx) ->
+  T=#{"ver"=>2,
+      "body"=>Bin,
+      "sig"=>PS
      },
-      maps:with([extdata], Tx))
-   );
+  T1=case Tx of
+    #{inv:=Invite} ->
+         T#{"inv"=>Invite};
+       _ ->
+         T
+     end,
+  msgpack:pack(T1,[
+                  {spec,new},
+                  {pack_str, from_list}
+                 ]);
 
-pack(#{
-  register:=Reg
- }=Tx) ->
-  msgpack:pack(
-    maps:merge(
-      maps:with([address, timestamp, pow], Tx),
-      #{ type => <<"register">>,
-         register => Reg
-       }
-     )
-   );
-
-pack(#{
-  sig:=Sigs
- }=Tx) ->
-  TxBin=mkmsg(Tx),
-  {ok, [MType|LTx]} = msgpack:unpack(TxBin),
-
-  msgpack:pack(
-    maps:merge(
-      #{
-      type => MType,
-      tx => LTx,
-      sig => Sigs
-     },
-      maps:with([extdata], Tx))
-   );
-
-pack(Unknown) ->
-  throw({unknown_tx_to_pack, Unknown}).
+pack(Any) ->
+  tx1:pack(Any).
 
 unpack(Tx) when is_map(Tx) ->
   Tx;
 
 unpack(BinTx) when is_binary(BinTx) ->
-  unpack_mp(BinTx).
-
-unpack_mp(BinTx) when is_binary(BinTx) ->
   {ok, Tx0} = msgpack:unpack(BinTx, [{known_atoms,
                                       [type, sig, tx, patch, register,
-                                       register, address, block] },
+                                       register, address, block ] },
                                      {unpack_str, as_binary}] ),
-  Tx=maps:fold(
-       fun
-         ("tx", Val, Acc) ->
-           maps:put(tx,
-                    lists:map(
-                      fun(LI) when is_list(LI) ->
-                          list_to_binary(LI);
-                         (OI) -> OI
-                      end, Val), Acc);
-         ("type", Val, Acc) ->
-           maps:put(type,
-                    try
-                      erlang:list_to_existing_atom(Val)
-                    catch error:badarg ->
-                            Val
-                    end, Acc);
-         ("address", Val, Acc) ->
-           maps:put(address,
-                    list_to_binary(Val),
-                    Acc);
-         ("register", Val, Acc) ->
-           maps:put(register,
-                    list_to_binary(Val),
-                    Acc);
-         ("sig", Val, Acc) ->
-           maps:put(sig,
-                    if is_map(Val) ->
-                         maps:fold(
-                           fun(PubK, PrivK, KAcc) ->
-                               maps:put(
-                                 iolist_to_binary(PubK),
-                                 iolist_to_binary(PrivK),
-                                 KAcc)
-                           end, #{}, Val);
-                       is_list(Val) ->
-                         lists:foldl(
-                           fun([PubK, PrivK], KAcc) ->
-                               maps:put(PubK, PrivK, KAcc)
-                           end, #{}, Val)
-                    end,
-                    Acc);
-         (sig, Val, Acc) ->
-           maps:put(sig,
-                    if is_map(Val) ->
-                         maps:fold(
-                           fun(PubK, PrivK, KAcc) ->
-                               maps:put(
-                                 iolist_to_binary(PubK),
-                                 iolist_to_binary(PrivK),
-                                 KAcc)
-                           end, #{}, Val);
-                       is_list(Val) ->
-                         case Val of
-                           [X|_] when is_binary(X) ->
-                             Val;
-                           [[_, _]|_] ->
-                             lists:foldl(
-                               fun([PubK, PrivK], KAcc) ->
-                                   maps:put(PubK, PrivK, KAcc)
-                               end, #{}, Val)
-                         end;
-                       Val==<<>> ->
-                         lager:notice("Temporary workaround. Fix me"),
-                         []
-                    end,
-                    Acc);
-         (K, Val, Acc) ->
-           maps:put(K, Val, Acc)
-       end, #{}, Tx0),
-  #{type:=Type}=Tx,
-  R=case Type of
-
-      <<"deploy">> ->
-        #{sig:=Sig}=Tx,
-        lager:debug("tx ~p", [Tx]),
-        [From, Timestamp, Seq, VMType, NewCode| State] = maps:get(tx, Tx),
-        if is_integer(Timestamp) -> ok;
-           true -> throw({bad_timestamp, Timestamp})
-        end,
-        if is_binary(From) -> ok;
-           true -> throw({bad_type, from})
-        end,
-        if is_binary(NewCode) -> ok;
-           true -> throw({bad_type, code})
-        end,
-        if is_binary(VMType) -> ok;
-           true -> throw({bad_type, deploy})
-        end,
-        FTx=#{ type => Type,
-               from => From,
-               timestamp => Timestamp,
-               seq => Seq,
-               deploy => VMType,
-               code => NewCode,
-               sig => Sig
-             },
-        case State of
-          [] -> FTx;
-          [St] ->
-            if is_binary(St) -> ok;
-               true -> throw({bad_type, state})
-            end,
-            FTx#{state => St}
-        end;
-
-      tx -> %generic finance tx
-        #{sig:=Sig}=Tx,
-        lager:debug("tx ~p", [Tx]),
-        [From, To, Amount, Cur, Timestamp, Seq, ExtraJSON] = maps:get(tx, Tx),
-        if is_integer(Timestamp) ->
-             ok;
-           true ->
-             throw({bad_timestamp, Timestamp})
-        end,
-        FTx=#{ type => Type,
-               from => From,
-               to => To,
-               amount => Amount,
-               cur => Cur,
-               timestamp => Timestamp,
-               seq => Seq,
-               extradata => ExtraJSON,
-               sig => Sig
-             },
-        case maps:is_key(<<"extdata">>, Tx) of
-          true -> FTx;
-          false ->
-            try %parse fee data, if no extdata
-              DecodedJSON=jsx:decode(ExtraJSON, [return_maps]),
-              %make exception if no cur data
-              #{<<"fee">> := Fee,
-                <<"feecur">> := FeeCur}=DecodedJSON,
-              true=is_integer(Fee),
-              true=is_binary(FeeCur),
-              FTx#{extdata=> #{
-                     fee=>Fee,
-                     feecur=>FeeCur
-                    }}
-            catch _:_ ->
-                    FTx
-            end
-        end;
-
-      block ->
-        block:unpack(maps:get(block, Tx));
-
-      patch -> %settings patch
-        #{sig:=Sig}=Tx,
-        #{ patch => maps:get(patch, Tx),
-           sig => Sig};
-
-      register ->
-        PubKey=maps:get(register, Tx),
-        T=maps:get(<<"timestamp">>, Tx, 0),
-        POW=maps:get(<<"pow">>, Tx, <<>>),
-        case size(PubKey) of
-          33 -> ok;
-          _ -> throw('bad_pubkey')
-        end,
-        case maps:is_key(address, Tx) of
-          false ->
-            #{ type => register,
-               register => PubKey,
-               timestamp => T,
-               pow => POW
-             };
-          true ->
-            #{ type => register,
-               register => PubKey,
-               timestamp => T,
-               pow => POW,
-               address => maps:get(address, Tx)
-             }
-        end;
-
-      _ ->
-        lager:error("Bad tx ~p", [Tx]),
-        throw({"bad tx type", Type})
-    end,
-  case maps:is_key(<<"extdata">>, Tx) of
-    true ->
-      %probably newly parsed extdata should have priority? or not?
-      maps:fold( fun set_ext/3, R, maps:get(<<"extdata">>, Tx));
-    false ->
-      R
+  case Tx0 of
+    #{<<"ver">>:=2, sig:=Sign, <<"body">>:=TxBody, <<"inv">>:=Inv} ->
+      unpack_body( #{
+        ver=>2,
+        sig=>Sign,
+        body=>TxBody,
+        inv=>Inv
+       });
+    #{<<"ver">>:=2, sig:=Sign, <<"body">>:=TxBody} ->
+      unpack_body( #{
+        ver=>2,
+        sig=>Sign,
+        body=>TxBody
+       });
+    #{<<"ver">>:=2, <<"sig">>:=Sign, <<"body">>:=TxBody, <<"inv">>:=Inv} ->
+      unpack_body( #{
+        ver=>2,
+        sig=>Sign,
+        body=>TxBody,
+        inv=>Inv
+       });
+    #{<<"ver">>:=2, <<"sig">>:=Sign, <<"body">>:=TxBody} ->
+      unpack_body( #{
+        ver=>2,
+        sig=>Sign,
+        body=>TxBody
+       });
+    _ ->
+      tx1:unpack_mp(Tx0)
   end.
 
 txlist_hash(List) ->
@@ -590,6 +547,15 @@ txlist_hash(List) ->
                                     ({Id, #{}=Tx}, Acc) ->
                                      [Id, tx:pack(Tx)|Acc]
                                  end, [], lists:keysort(1, List)))).
+
+get_payload(#{ver:=2, kind:=generic, payload:=Payload}=_Tx, Purpose) ->
+  lists:foldl(
+    fun(#{amount:=_,cur:=_,purpose:=P1}=A, undefined) when P1==Purpose ->
+        A;
+       (_,A) ->
+        A
+    end, undefined, Payload).
+
 
 rate1(#{extradata:=ED}, Cur, TxAmount, GetRateFun) ->
   #{<<"base">>:=Base,
@@ -602,6 +568,36 @@ rate1(#{extradata:=ED}, Cur, TxAmount, GetRateFun) ->
       cost=>Cost,
       tip => max(0, TxAmount - Cost)
     }}.
+
+rate2(#{body:=Body}, Cur, TxAmount, GetRateFun) ->
+  #{<<"base">>:=Base,
+    <<"kb">>:=KB}=Rates=GetRateFun(Cur),
+  BaseEx=maps:get(<<"baseextra">>, Rates, 0),
+  BodySize=size(Body)-32, %correcton rate
+  ExtCur=max(0, BodySize-BaseEx),
+  Cost=Base+trunc(ExtCur*KB/1024),
+  {TxAmount >= Cost,
+   #{ cur=>Cur,
+      cost=>Cost,
+      tip => max(0, TxAmount - Cost)
+    }}.
+
+rate(#{ver:=2, kind:=generic}=Tx, GetRateFun) ->
+  try
+    case get_payload(Tx, srcfee) of
+      #{cur:=Cur, amount:=TxAmount} ->
+        rate2(Tx, Cur, TxAmount, GetRateFun);
+      _ ->
+        case GetRateFun({params, <<"feeaddr">>}) of
+          X when is_binary(X) ->
+            {false, #{ cost=>null } };
+          _ ->
+            {true, #{ cost=>0, tip => 0, cur=><<"NONE">> }}
+        end
+    end
+  catch _:_ -> throw('cant_calculate_fee')
+  end;
+
 
 rate(#{cur:=TCur}=Tx, GetRateFun) ->
   try
@@ -621,249 +617,72 @@ rate(#{cur:=TCur}=Tx, GetRateFun) ->
   catch _:_ -> throw('cant_calculate_fee')
   end.
 
--ifdef(TEST).
-register_test() ->
-  Priv= <<194, 124, 65, 109, 233, 236, 108, 24, 50, 151, 189, 216,
-          123, 142, 115, 120, 124, 240, 248, 115, 150, 54, 239,
-          58, 218, 221, 145, 246, 158, 15, 210, 165>>,
-  PubKey=tpecdsa:calc_pub(Priv, true),
-  T=1522252760000,
-  Res=
-  tx:unpack(
-    tx:pack(
-      tx:unpack(
-        msgpack:pack(
-          #{
-          "type"=>"register",
-          timestamp=>T,
-          pow=>crypto:hash(sha256, <<T:64/big, PubKey/binary>>),
-          register=>PubKey
-         }
-         )
-       )
-     )
-   ),
-  #{register:=PubKey, timestamp:=T, pow:=<<223, 92, 191, _/binary>>}=Res.
+intdiff(I) when I>0 andalso I<128 ->
+  intdiff(I bsl 1)+1;
 
-tx_jsondata_test() ->
-  Pvt1= <<194, 124, 65, 109, 233, 236, 108, 24, 50, 151, 189, 216, 23, 42, 215, 220, 24, 240,
-          248, 115, 150, 54, 239, 58, 218, 221, 145, 246, 158, 15, 210, 165>>,
-  %Pub1Min=tpecdsa:secp256k1_ec_pubkey_create(Pvt1, true),
-  From=(naddress:construct_public(0, 0, 1)),
-  BinTx1=sign(#{
-           from => From,
-           to => From,
-           cur => <<"TEST">>,
-           timestamp => 1512450000,
-           seq => 1,
-           amount => 10,
-           extradata=>jsx:encode(#{
-                        fee=>30,
-                        feecur=><<"TEST">>,
-                        message=><<"preved123456789012345678901234567891234567890">>
-                       })
-          }, Pvt1),
-  BinTx2=sign(#{
-           from => From,
-           to => From,
-           cur => <<"TEST">>,
-           timestamp => 1512450000,
-           seq => 1,
-           amount => 10,
-           extradata=>jsx:encode(#{
-                        fee=>10,
-                        feecur=><<"TEST">>,
-                        message=><<"preved123456789012345678901234567891234567890">>
-                       })
-          }, Pvt1),
-  GetRateFun=fun(_Currency) ->
-                 #{ <<"base">> => 1,
-                    <<"baseextra">> => 64,
-                    <<"kb">> => 1000
-                  }
-             end,
-  UTx1=tx:unpack(BinTx1),
-  UTx2=tx:unpack(BinTx2),
-  [
-   ?assertEqual(UTx1, tx:unpack( tx:pack(UTx1))),
-   ?assertMatch({true, #{cost:=20, tip:=10}}, rate(UTx1, GetRateFun)),
-   ?assertMatch({false, #{cost:=20, tip:=0}}, rate(UTx2, GetRateFun))
-  ].
+intdiff(_I) ->
+  0.
 
-digaddr_tx_test() ->
-  Priv= <<194, 124, 65, 109, 233, 236, 108, 24, 50, 151, 189, 216,
-          123, 142, 115, 120, 124, 240, 248, 115, 150, 54, 239,
-          58, 218, 221, 145, 246, 158, 15, 210, 165>>,
-  PubKey=tpecdsa:calc_pub(Priv, true),
-  From=(naddress:construct_public(0, 0, 1)),
-  Test=fun() ->
-           To=(naddress:construct_public(0, 0, 2)),
-           TestTx2=#{ from=>From,
-                      to=>To,
-                      cur=><<"tkn1">>,
-                      amount=>1244327463428479872,
-                      timestamp => os:system_time(millisecond),
-                      seq=>1
-                    },
-           BinTx2=tx:sign(TestTx2, Priv),
-           BinTx2r=tx:pack(tx:unpack(BinTx2)),
-           {ok, CheckTx2}=tx:verify(BinTx2),
-           {ok, CheckTx2r}=tx:verify(BinTx2r),
-           CheckTx2=CheckTx2r
-       end,
-  Ledger=[ {From, bal:put(pubkey, PubKey, bal:new()) } ],
-  ledger:deploy4test(Ledger, Test).
+hashdiff(<<0,_Rest/binary>>) ->
+  hashdiff(_Rest)+8;
 
-patch_test() ->
-  Priv= <<194, 124, 65, 109, 233, 236, 108, 24, 50, 151, 189, 216,
-          123, 142, 115, 120, 124, 240, 248, 115, 150, 54, 239,
-          58, 218, 221, 145, 246, 158, 15, 210, 165>>,
-  Patch=settings:sign(
-          settings:dmp(
-            settings:mp(
-              [
-               #{t=>set, p=>[current, fee, params, <<"feeaddr">>],
-                 v=><<160, 0, 0, 0, 0, 0, 0, 1>>},
-               #{t=>set, p=>[current, fee, params, <<"tipaddr">>],
-                 v=><<160, 0, 0, 0, 0, 0, 0, 2>>},
-               #{t=>set, p=>[current, fee, params, <<"notip">>], v=>0},
-               #{t=>set, p=>[current, fee, <<"FTT">>, <<"base">>], v=>trunc(1.0e7)},
-               #{t=>set, p=>[current, fee, <<"FTT">>, <<"baseextra">>], v=>64},
-               #{t=>set, p=>[current, fee, <<"FTT">>, <<"kb">>], v=>trunc(1.0e9)}
-              ])),
-          Priv),
-  io:format("PK ~p~n", [settings:verify(Patch)]),
-  tx:verify(Patch).
+hashdiff(<<I:8/integer,_Rest/binary>>) ->
+  intdiff(I);
 
-deploy_test() ->
-  Priv= <<194, 124, 65, 109, 233, 236, 108, 24, 50, 151, 189, 216,
-          123, 142, 115, 120, 124, 240, 248, 115, 150, 54, 239,
-          58, 218, 221, 145, 246, 158, 15, 210, 165>>,
-  PubKey=tpecdsa:calc_pub(Priv, true),
-  From=(naddress:construct_public(0, 0, 1)),
-  Test=fun() ->
-           TestTx2=#{ from=>From,
-                      deploy=><<"chainfee">>,
-                      code=><<"code">>,
-                      state=><<"state">>,
-                      timestamp => os:system_time(millisecond),
-                      seq=>1
-                    },
-           BinTx2=tx:sign(TestTx2, Priv),
-           BinTx2r=tx:pack(tx:unpack(BinTx2)),
-           {ok, CheckTx2}=tx:verify(BinTx2),
-           {ok, CheckTx2r}=tx:verify(BinTx2r),
-           [
-            ?assertEqual(CheckTx2, CheckTx2r),
-            ?assertEqual(maps:without([sigverify], CheckTx2r), tx:unpack(BinTx2))
-           ]
-       end,
-  Ledger=[ {From, bal:put(pubkey, PubKey, bal:new()) } ],
-  ledger:deploy4test(Ledger, Test).
+hashdiff(_) ->
+  0.
 
+mine_sha512(Body, Nonce, Diff) ->
+  DS=Body#{pow=>Nonce},
+%  if Nonce rem 1000000 == 0 ->
+%       io:format("nonce ~w~n",[Nonce]);
+%     true -> ok
+%  end,
+  Hash=crypto:hash(sha512,pack_body(DS)),
+  Act=if Diff rem 8 == 0 ->
+           <<Act1:Diff/big,_/binary>>=Hash,
+           Act1;
+         true ->
+           Pad=8-(Diff rem 8),
+           <<Act1:Diff/big,_:Pad/big,_/binary>>=Hash,
+           Act1
+      end,
+  if Act==0 ->
+       %io:format("Mined nonce ~w~n",[Nonce]),
+       DS;
+     true ->
+       mine_sha512(Body,Nonce+1,Diff)
+  end.
 
-new_tx_test() ->
-  Priv=tpecdsa:generate_priv(),
-  From=address:pub2addr(255, tpecdsa:calc_pub(Priv, true)),
-  To=address:pub2addr(255, tpecdsa:calc_pub(tpecdsa:generate_priv(), true)),
-  TestTx1=#{signature=>#{<<"a">>=><<"123">>},
-            extdata=>#{<<"aaa">>=>111, 222=><<"bbb">>},
-            from=>From,
-            to=>To,
-            cur=>"CUR1",
-            amount=>1, timestamp => os:system_time(millisecond), seq=>1},
-  BinTx1=tx:sign(TestTx1, Priv),
-  {ok, CheckTx1}=tx:verify(BinTx1),
-
-  TestTx2=#{ from=>From,
-             to=>To,
-             cur=>"XCUR",
-             amount=>12344327463428479872,
-             timestamp => os:system_time(millisecond),
-             seq=>1
-           },
-  BinTx2=tx:sign(TestTx2, Priv),
-  BinTx2r=tx:pack(tx:unpack(BinTx2)),
-  {ok, CheckTx2}=tx:verify(BinTx2),
-  {ok, CheckTx2r}=tx:verify(BinTx2r),
-  ?assertEqual(#{invalid => 1, valid => 1}, maps:get(sigverify, CheckTx1)),
-  ?assertEqual(#{invalid => 0, valid => 1}, maps:get(sigverify, CheckTx2)),
-  ?assertEqual(#{invalid => 0, valid => 1}, maps:get(sigverify, CheckTx2r)),
-  BinTx2r.
-
-txs_sig_test() ->
-  Pvt1= <<194, 124, 65, 109, 233, 236, 108, 24, 50, 151, 189, 216, 23, 42, 215, 220, 24,
-          240, 248, 115, 150, 54, 239, 58, 218, 221, 145, 246, 158, 15, 210, 165>>,
-  Addr=naddress:construct_public(1, 2, 3),
-  BinTx1=sign(#{
-           from => Addr,
-           to => Addr,
-           cur => <<"test">>,
-           timestamp => 1512450000,
-           seq => 1,
-           amount => 10
-          }, Pvt1),
-  BinTx2=sign(#{
-           from => Addr,
-           to => Addr,
-           cur => <<"test2">>,
-           timestamp => 1512450011,
-           seq => 2,
-           amount => 20
-          }, Pvt1),
-  Txs=[{<<"txid1">>, BinTx1}, {<<"txid2">>, BinTx2}],
-  H1=txlist_hash(Txs),
-
-  Txs2=[ {<<"txid2">>, tx:unpack(BinTx2)}, {<<"txid1">>, tx:unpack(BinTx1)} ],
-  H2=txlist_hash(Txs2),
-
-  Txs3=[ {<<"txid1">>, tx:unpack(BinTx2)}, {<<"txid2">>, tx:unpack(BinTx1)} ],
-  H3=txlist_hash(Txs3),
-
-  [
-   ?assertEqual(H1, H2),
-   ?assertNotEqual(H1, H3)
-  ].
-
-
-tx_test() ->
-  Pvt1= <<194, 124, 65, 109, 233, 236, 108, 24, 50, 151, 189, 216, 23, 42, 215, 220, 24, 240,
-          248, 115, 150, 54, 239, 58, 218, 221, 145, 246, 158, 15, 210, 165>>,
-  Pvt2= <<200, 200, 100, 11, 222, 33, 108, 24, 50, 151, 189, 216, 23, 42, 215, 220, 24, 240,
-          248, 115, 150, 54, 239, 58, 218, 221, 145, 246, 158, 15, 210, 165>>,
-  Pub1Min=tpecdsa:secp256k1_ec_pubkey_create(Pvt1, true),
-  Pub2Min=tpecdsa:secp256k1_ec_pubkey_create(Pvt2, true),
-  Dst=address:pub2addr({ver, 1}, Pub2Min),
-  BinTx1=try
-           sign(#{
-             from => <<"src">>,
-             to => Dst,
-             cur => <<"test">>,
-             timestamp => 1512450000,
-             seq => 1,
-             amount => 10
-            }, Pvt1)
-         catch throw:Ee1 ->
-                 {throw, Ee1}
-         end,
-  ?assertEqual({throw, {invalid_address, from}}, BinTx1),
-  From=address:pub2addr({ver, 1}, Pub1Min),
-  BinTx2=sign(#{
-           from => From,
-           to => Dst,
-           cur => <<"test">>,
-           timestamp => 1512450000,
-           seq => 1,
-           amount => 10
-          }, Pvt1),
-  {ok, ExTx}=verify(BinTx2),
-  {ok, ExTx1}=verify(tx:pack(tx:unpack(BinTx2))),
-  [
-   ?assertMatch([{Pub1Min, _}], maps:to_list(maps:get(sig, ExTx))),
-   ?assertMatch([{Pub1Min, _}], maps:to_list(maps:get(sig, ExTx))),
-   ?assertEqual(ExTx, ExTx1)
-  ].
-
--endif.
-
+upgrade(#{
+  from:=From,
+  to:=To,
+  amount:=Amount,
+  cur:=Cur,
+  seq:=Seq,
+  timestamp:=T
+ }=Tx) ->
+  DED=jsx:decode(maps:get(extradata, Tx, "{}"), [return_maps]),
+  Fee=case DED of 
+        #{ <<"fee">>:=FeeA, <<"feecur">>:=FeeC } ->
+          [#{amount=>FeeA, cur=>FeeC, purpose=>srcfee}];
+        _ ->
+          []
+      end,
+  TxExt=case DED of
+          #{<<"message">>:=Msg} ->
+            #{msg=>Msg};
+          _ ->
+            #{}
+        end,
+  construct_tx(#{
+    ver=>2,
+    kind=>generic,
+    from=>From,
+    to=>To,
+    t=>T,
+    seq=>Seq,
+    payload=>[#{amount=>Amount, cur=>Cur, purpose=>transfer}|Fee],
+    txext => TxExt
+   }).
 

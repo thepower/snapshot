@@ -55,7 +55,7 @@
 %% ------------------------------------------------------------------
 
 -export([start_link/0]).
--export([new_tx/1, get_pack/0]).
+-export([new_tx/1, get_pack/0, inbound_block/1]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -70,6 +70,9 @@
 
 new_tx(BinTX) ->
     gen_server:call(txpool, {new_tx, BinTX}).
+
+inbound_block(Blk) ->
+  gen_server:cast(txpool, {inbound_block, Blk}).
 
 get_pack() ->
     gen_server:call(txpool, get_pack).
@@ -289,7 +292,7 @@ handle_cast({failed, Txs}, #{inprocess:=InProc0}=State) ->
 
 
 handle_cast(_Msg, State) ->
-    lager:info("Unkown cast ~p", [_Msg]),
+    lager:info("Unknown cast ~p", [_Msg]),
     {noreply, State}.
 
 handle_info(_Info, State) ->

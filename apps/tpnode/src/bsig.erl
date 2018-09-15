@@ -47,28 +47,45 @@
 %%% END OF TERMS AND CONDITIONS
 
 -module(bsig).
--export([checksig/2, checksig1/2]).
+-export([checksig/3, checksig/2]).
+-export([checksig1/3, checksig1/2]).
 -export([signhash/3, signhash1/3]).
 -export([packsig/1, unpacksig/1]).
 -export([pack_sign_ed/1, unpack_sign_ed/1]).
 -export([add_sig/2]).
+-export([extract_pubkeys/1]).
 
 checksig1(BlockHash, SrcSig) ->
+  checksig1(BlockHash, SrcSig, undefined).
+
+ checksig1(BlockHash, SrcSig, CheckFun) ->
     HSig=unpacksig(SrcSig),
     #{binextra:=BExt, extra:=Xtra, signature:=Sig}=US=unpacksig(HSig),
     PubKey=proplists:get_value(pubkey, Xtra),
     Msg= <<BExt/binary, BlockHash/binary>>,
-    case tpecdsa:secp256k1_ecdsa_verify(Msg, Sig, PubKey) of
+    case tpecdsa:verify(Msg, PubKey, Sig) of
         correct ->
-            {true, US};
+            C2=if is_function(CheckFun) ->
+                    CheckFun(PubKey,US);
+                  CheckFun==undefined ->
+                    true
+               end,
+            if C2 ->
+                 {true, US};
+               true ->
+                 false
+            end;
         _ ->
             false
     end.
 
 checksig(BlockHash, Sigs) ->
+  checksig(BlockHash, Sigs, undefined).
+
+checksig(BlockHash, Sigs, CheckFun) ->
     lists:foldl(
       fun(SrcSig, {Succ, Fail}) ->
-              case checksig1(BlockHash, SrcSig) of
+              case checksig1(BlockHash, SrcSig, CheckFun) of
                   {true, US} ->
                       {[US|Succ], Fail};
                   false ->
@@ -76,14 +93,21 @@ checksig(BlockHash, Sigs) ->
               end
       end, {[], 0}, Sigs).
 
+extract_pubkeys(BSList) ->
+  lists:map(
+    fun(#{extra:=Xtra}) ->
+        proplists:get_value(pubkey, Xtra)
+    end,
+    BSList).
+
 signhash1(MsgHash, ExtraData, PrivKey) ->
     BinExtra=pack_sign_ed(ExtraData),
     Msg= <<BinExtra/binary, MsgHash/binary>>,
-    Signature=tpecdsa:secp256k1_ecdsa_sign(Msg, PrivKey, default, <<>>),
+    Signature=tpecdsa:sign(Msg, PrivKey),
     <<255, (size(Signature)):8/integer, Signature/binary, BinExtra/binary>>.
 
 signhash(MsgHash, ExtraData, PrivKey) ->
-  PubKey=tpecdsa:secp256k1_ec_pubkey_create(PrivKey, true),
+  PubKey=tpecdsa:calc_pub(PrivKey, true),
   signhash1(MsgHash, [{pubkey, PubKey}|ExtraData], PrivKey).
 
 unpack_sign_ed(Bin) -> unpack_sign_ed(Bin, []).

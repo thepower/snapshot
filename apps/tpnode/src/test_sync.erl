@@ -47,14 +47,14 @@
 %%% END OF TERMS AND CONDITIONS
 
 -module(test_sync).
--export([run/0, run1/0, test1/0, candidates/0]).
+-export([run1/0, test1/0, candidates/0]).
 
 call(Handler, Object, Atoms) ->
     io:format("Calling ~p~n", [Object]),
     Res=tpic:call(tpic, Handler, msgpack:pack(Object)),
     lists:filtermap(
       fun({Peer, Bin}) ->
-              io:format("Responce from ~p~n", [Peer]),
+              io:format("Response from ~p~n", [Peer]),
               case msgpack:unpack(Bin, [{known_atoms, Atoms}]) of
                   {ok, Decode} ->
                       {true, {Peer, Decode}};
@@ -74,7 +74,8 @@ checkcand(Cs) ->
 
 test1() ->
     %block by block synchromization
-    [{Handler, Candidate}|_]=checkcand(call(<<"blockchain">>,
+    [{Handler, Candidate}|_]=checkcand(
+                               call(<<"blockchain">>,
                                  #{null=><<"sync_request">>},
                                  [last_hash, last_height, chain]
                                 )),
@@ -116,36 +117,36 @@ test1(Handler, Hash, Rest) ->
     end.
 
 
-run() ->
-    %instant synchronization
-    [{Handler, Candidate}|_]=checkcand(call(<<"blockchain">>,
-                                 #{null=><<"sync_request">>},
-                                 [last_hash, last_height, chain]
-                                )),
-    #{null:=Avail,
-      chain:=Chain,
-      last_hash:=Hash,
-      last_height:=Height}=Candidate,
-    io:format("~s chain ~w h= ~w hash= ~s ~n",
-              [ Avail, Chain, Height, bin2hex:dbin2hex(Hash) ]),
-    io:format("Handler ~p~n", [Handler]),
-    R=call(Handler,
-           #{null=><<"instant_sync_run">>},
-           []
-          ),
-
-    Name=test_sync_ledger,
-    {ok, Pid}=ledger:start_link(
-               [{filename, "db/ledger_test_syncx"},
-                {name, Name}
-               ]
-              ),
-    gen_server:call(Pid, '_flush'),
-    Result=cont(R),
-    {ok, C}=gen_server:call(test_sync_ledger, {check, []}),
-    gen_server:cast(Pid, terminate),
-    io:format("My Ledger ~s~n", [bin2hex:dbin2hex(C)]),
-    Result.
+%run() ->
+%    %instant synchronization
+%    [{Handler, Candidate}|_]=checkcand(call(<<"blockchain">>,
+%                                 #{null=><<"sync_request">>},
+%                                 [last_hash, last_height, chain]
+%                                )),
+%    #{null:=Avail,
+%      chain:=Chain,
+%      last_hash:=Hash,
+%      last_height:=Height}=Candidate,
+%    io:format("~s chain ~w h= ~w hash= ~s ~n",
+%              [ Avail, Chain, Height, bin2hex:dbin2hex(Hash) ]),
+%    io:format("Handler ~p~n", [Handler]),
+%    R=call(Handler,
+%           #{null=><<"instant_sync_run">>},
+%           []
+%          ),
+%
+%    Name=test_sync_ledger,
+%    {ok, Pid}=ledger:start_link(
+%               [{filename, "db/ledger_test_syncx"},
+%                {name, Name}
+%               ]
+%              ),
+%    gen_server:call(Pid, '_flush'),
+%    Result=cont(R),
+%    {ok, C}=gen_server:call(test_sync_ledger, {check, []}),
+%    gen_server:cast(Pid, terminate),
+%    io:format("My Ledger ~s~n", [bin2hex:dbin2hex(C)]),
+%    Result.
 
 run1() ->
     %instant synchronization
@@ -214,31 +215,32 @@ wait_more() ->
               timeout
     end.
 
-cont([{Handler, Res}]) ->
-    case Res of
-        #{<<"block">>:=BinBlock} ->
-            #{hash:=Hash, header:=#{ledger_hash:=LH, height:=Height}}=block:unpack(BinBlock),
-            io:format("Got block ~p ~s~n", [Height, bin2hex:dbin2hex(Hash)]),
-            io:format("Block's Ledger ~s~n", [bin2hex:dbin2hex(LH)]),
-            R=call(Handler, #{null=><<"continue">>}, []),
-            cont(R);
-        #{<<"done">>:=false, <<"ledger">>:=L} ->
-            l_apply(L),
-            io:format("L ~w~n", [maps:size(L)]),
-            R=call(Handler, #{null=><<"continue">>}, []),
-            cont(R);
-        #{<<"done">>:=true, <<"ledger">>:=L} ->
-            l_apply(L),
-            io:format("L ~w~n", [maps:size(L)]),
-            io:format("Done~n"),
-            done
-    end.
-
-
-l_apply(L) ->
-    gen_server:call(test_sync_ledger,
-                    {put, maps:fold(
-                            fun(K, V, A) ->
-                                    [{K, bal:unpack(V)}|A]
-                            end, [], L)}).
-
+%cont([{Handler, Res}]) ->
+%    case Res of
+%        #{<<"block">>:=BinBlock} ->
+%            io:format("Block ~p~n",[msgpack:unpack(BinBlock)]),
+%            #{hash:=Hash, header:=#{ledger_hash:=LH, height:=Height}}=block:unpack(BinBlock),
+%            io:format("Got block ~p ~s~n", [Height, bin2hex:dbin2hex(Hash)]),
+%            io:format("Block's Ledger ~s~n", [bin2hex:dbin2hex(LH)]),
+%            R=call(Handler, #{null=><<"continue">>}, []),
+%            cont(R);
+%        #{<<"done">>:=false, <<"ledger">>:=L} ->
+%            l_apply(L),
+%            io:format("L ~w~n", [maps:size(L)]),
+%            R=call(Handler, #{null=><<"continue">>}, []),
+%            cont(R);
+%        #{<<"done">>:=true, <<"ledger">>:=L} ->
+%            l_apply(L),
+%            io:format("L ~w~n", [maps:size(L)]),
+%            io:format("Done~n"),
+%            done
+%    end.
+%
+%
+%l_apply(L) ->
+%    gen_server:call(test_sync_ledger,
+%                    {put, maps:fold(
+%                            fun(K, V, A) ->
+%                                    [{K, bal:unpack(V)}|A]
+%                            end, [], L)}).
+%

@@ -108,6 +108,31 @@ test_reg_invites() ->
           "configs/tnc10/tn101/c101*.config" ),
   Patch.
 
+add_node_to_chain(Name, PubKey, ChainNo) when is_binary(Name) andalso 
+                                              is_binary(PubKey) andalso
+                                              is_integer(ChainNo) ->
+  Patches=[
+           #{t=>set, p=>[keys, Name], v=>PubKey},
+           #{t=>set, p=>[nodechain, Name], v=>ChainNo}
+          ],
+  Patch=scratchpad:sign_patch(
+          settings:dmp(
+            settings:mp(lists:flatten(Patches))),
+          "configs/tnc10/tn101/c101*.config" ),
+  Patch.
+
+test_rucoin() ->
+  Patches=[
+           #{t=>set, p=>[<<"current">>, <<"endless">>, 
+                         <<128,1,64,0,1,0,0,95>>,
+                         <<"RCL">>], v=>true}
+          ],
+  Patch=scratchpad:sign_patch(
+          settings:dmp(
+            settings:mp(lists:flatten(Patches))),
+          "configs/c1n*.config" ),
+  Patch.
+
 test_el() ->
   Patches=[
 %           #{t=>set, p=>[<<"current">>, <<"endless">>, 
