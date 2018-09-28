@@ -4,26 +4,82 @@
 
 Here is a list of main modules with short description:
 
- - *tpecdsa.erl* - secp256k1 cryptography primitives
- - *naddress.erl* - Address format, encoder, parser, constructor tx.erl - transaction constructor, packer, unpacker, verifier
- - *txpool.erl* - pool of transactions ledger.erl - ledger (chain's accounts keeper)
- - *ledger_sync.erl* - synchronization of ledgers
- - *bal.erl* - ledger item (individual account), constructor, packer, unpacker
+#### Transactions pool
+
+Recieves transations from clients and feeds the block generator in time.
+
+ - *tx.erl* - transaction constructor, packer, unpacker, verifier
+ - *txpool.erl* - pool of transactions
+ - *txstatus.erl* - transaction status tracking (allows client determine status of transaction and, in case of failure, reason)
+
+#### Synchronizer
+
+Synchronizer is shard's common time tracker
+
+ - *synchronizer.erl* - shard's time synchronizer
+ - *beacon.erl* - beacons for shard's topology calculation
+ - *topology.erl* - shard's topology calculator
+
+
+#### Block generator
+
  - *block.erl* - block manipulation functions
  - *mkblock.erl* - block constructor
- - *blockvote.erl* - collector of votes for block
- - *blockchain.erl* - block chain tracker
  - *bsig.erl* - block signature packer
- - *chainsettings.erl* - API for chain's settings manipulating
- - *synchronizer.erl* - chain's time synchronizer
- - *xchain** - set of modules for cross chain blocks passing
 
-_______________________________
+
+#### Consensus (block vote)
+
+ - *blockvote.erl* - collector of votes for block
+
+
+#### Ledger
+
+ - *ledger.erl* - shard's accounts keeper
+ - *ledger_sync.erl* - synchronization of ledgers
+ - *bal.erl* - ledger item (individual account), constructor, packer, unpacker
+
+
+#### Blockchain
+
+ - *blockchain.erl* - block chain tracker
+ - *naddress.erl* - Address format, encoder, parser, constructor
+ - *chainsettings.erl* - API for chain's settings manipulating
+ - *mkpatches.erl* - chain configuration tools
+ - *nodekey.erl* - node key manipulation tools
+
+#### Sharding
+
+Xchain server/xchain client - mechanism for realtime and deferred delivery of outward blocks (cross shard blocks)
+
+ - *xchain.erl* - cross shard's data manipulation utils
+ - *xchain_api.erl* - sharding api for cross shard block synchronization
+ - *xchain_client.erl* - clients dispatcher
+ - *xchain_client_handler.erl* - client side sharding api
+ - *xchain_client_worker.erl* - client for cross shard api
+ - *xchain_dispatcher.erl* - connections dispatcher (server side)
+ - *xchain_server.erl* - protocol handler (server side)
+ - *xchain_server_handler.erl* - server for cross shard api
+
+#### Common utils
+
+ - *tpecdsa.erl* - secp256k1 cryptography primitives
+ - *hex.erl* - utils for working with hex representation of binary data
+ - *base58.erl* - utils for working with base58 representation of binary data
+ - *hashqueue.erl* - queue implementation with access to it's elements by transaction ID
+ - *bron_kerbosch.erl* - Bron Kerbosch algorithm implementation
+ - *ldb.erl* - database manipulating tools
+ - *rdb_dispatcher.erl* - database manipulating tools
+
+
+
+
+--------------------------------
 **"ThePower.io"**
 *Copyright (C) 2018 Mikhaylenko Maxim, Belousov Igor
 This program is not free software; you can not redistribute it and/or
 modify it in accordance the following terms and conditions,*
-_______________________________
+--------------------------------
 
 TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
 
