@@ -47,7 +47,7 @@
 %%% END OF TERMS AND CONDITIONS
 
 -module(tpnode_http).
--export([childspec/0, childspec_ssl/2, child_names_ssl/0, get_ssl_port/0]).
+-export([childspec/0, childspec_ssl/2, child_names_ssl/0, get_ssl_port/0, get_ssl_port/1]).
 
 
 get_http_conn_type() ->
@@ -104,7 +104,10 @@ childspec() ->
 
 
 get_ssl_port() ->
-  application:get_env(tpnode, rpcsport, 43380).
+  get_ssl_port(43380).
+
+get_ssl_port(DefaultPort) ->
+  application:get_env(tpnode, rpcsport, DefaultPort).
   
 
 childspec_ssl(CertFile, KeyFile) ->

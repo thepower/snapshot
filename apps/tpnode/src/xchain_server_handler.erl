@@ -60,7 +60,7 @@ known_atoms() ->
 handle_xchain(#{null:=<<"last_ptr">>,
                 <<"chain">>:=Chain}) ->
   ChainPath=[<<"current">>, <<"outward">>, xchain:pack_chid(Chain)],
-  Last=chainsettings:get_settings_by_path(ChainPath),
+  Last=chainsettings:by_path(ChainPath),
   H=settings:get([<<".">>,<<"height">>,<<"ublk">>],Last),
   #{ null=><<"last_ptr">>,
      chain=>blockchain:chain(),
@@ -132,9 +132,11 @@ handle_xchain(#{null:=<<"owblock">>,
 
 handle_xchain(#{null:=<<"node_id">>,
                 <<"node_id">>:=RemoteNodeId,
-                <<"chain">>:=_RemoteChain}) ->
+                <<"chain">>:=RemoteChain}) ->
   try
     lager:info("Got nodeid ~p",[RemoteNodeId]),
+    gen_server:cast(xchain_dispatcher,
+                    {register_peer, self(), RemoteNodeId, RemoteChain}),
     #{null=><<"iam">>, 
       <<"node_id">>=>nodekey:node_id(),
       <<"chain">>=>blockchain:chain()

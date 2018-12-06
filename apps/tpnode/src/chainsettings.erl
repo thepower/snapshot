@@ -52,8 +52,24 @@
 -export([get_val/1,get_val/2]).
 -export([get_setting/1,
          is_our_node/1,
+         is_our_node/2,
          settings_to_ets/1,
-         get_settings_by_path/1]).
+         all/0, by_path/1]).
+
+is_our_node(PubKey, Settings) ->
+  KeyDB=maps:get(keys, Settings, #{}),
+  NodeChain=maps:get(nodechain, Settings, #{}),
+  ChainNodes0=maps:fold(
+                fun(Name, XPubKey, Acc) ->
+                    maps:put(XPubKey, Name, Acc)
+                end, #{}, KeyDB),
+  MyName=maps:get(nodekey:get_pub(), ChainNodes0, undefined),
+  MyChain=maps:get(MyName, NodeChain, 0),
+  ChainNodes=maps:filter(
+               fun(_PubKey, Name) ->
+                   maps:get(Name, NodeChain, 0) == MyChain
+               end, ChainNodes0),
+  maps:get(PubKey, ChainNodes, false).
 
 is_our_node(PubKey) ->
   {ok, NMap} = chainsettings:get_setting(chainnodes),
@@ -67,7 +83,17 @@ get_setting(Named) ->
       error
   end.
 
-get_settings_by_path(GetPath) ->
+all() ->
+  R=ets:match(blockchain,{'$1','_','$3','$2'}),
+  lists:foldl(
+    fun([Path,Val,Act],Acc) ->
+        settings:patch([#{<<"t">>=>Act, <<"p">>=>Path, <<"v">>=>Val}], Acc)
+    end,
+    #{},
+    R
+   ).
+
+by_path(GetPath) ->
   R=ets:match(blockchain,{GetPath++'$1','_','$3','$2'}),
   case R of
     [[[],Val,<<"set">>]] ->
@@ -116,15 +142,28 @@ settings_to_ets(NewSettings) ->
 get_val(Name) ->
   get_val(Name, undefined).
 
+get_val(Name, Default) when Name==minsig; Name==patchsig ->
+  Val=by_path([<<"current">>,chain,Name]),
+  if is_integer(Val) -> Val;
+     true ->
+       case ets:lookup(blockchain,chainnodes) of
+         [{chainnodes,Map}] ->
+           lager:error("No ~s specified!!!!!",[Name]),
+           (maps:size(Map) div 2)+1;
+         _ ->
+           Default
+       end
+  end;
+
 get_val(Name,Default) ->
-  Val=get_settings_by_path([<<"current">>,chain,Name]),
+  Val=by_path([<<"current">>,chain,Name]),
   if is_integer(Val) -> Val;
      true -> Default
   end.
 
 get(Key, Settings) ->
   get(Key, Settings, fun() ->
-               {Chain, _}=gen_server:call(blockchain, last_block_height, -1),
+               {Chain, _}=gen_server:call(blockchain, last_block_height),
                true=is_integer(Chain),
                Chain
            end).
@@ -159,7 +198,7 @@ get(Name, Sets, GetChain) ->
   if is_integer(MinSig) -> MinSig;
      true ->
        MinSig_old=settings:get([chain,GetChain(),Name], Sets),
-       if is_integer(MinSig_old) -> 
+       if is_integer(MinSig_old) ->
             lager:info("Got setting ~p from deprecated place",[Name]),
             MinSig_old;
           true -> undefined

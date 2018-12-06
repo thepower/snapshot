@@ -200,9 +200,12 @@ handle_call(dump, _From, #{db:=DB}=State) ->
 				   ),
 	{reply, GB, State};
 
-handle_call(snapshot, _From, #{db:=DB}=State) ->
-    {ok, Snap}=rocksdb:snapshot(DB),
-    {reply, {DB, Snap}, State};
+handle_call(snapshot, _From, #{db:=DB, mt:=MT}=State) ->
+   MT1=gb_merkle_trees:balance(MT),
+   H=gb_merkle_trees:root_hash(MT1),
+   lager:info("snapshot mt ~p",[H]),
+   {ok, Snap}=rocksdb:snapshot(DB),
+   {reply, {DB, Snap}, State};
 
 handle_call('_flush', _From, State) ->
     drop_db(State),
@@ -272,7 +275,7 @@ handle_call({Action, KVS0, BlockID}, _From, #{db:=DB, mt:=MT}=State) when
                   fun({K, V}, Total) ->
                           ok=rocksdb:batch_put(Batch, K,
                                                term_to_binary(
-                                                 maps:remove(ublk,V)
+                                                 maps:without([ublk,changes],V)
                                                 )
                                               ),
                           if BlockID == undefined ->
@@ -398,29 +401,31 @@ deploy4test(LedgerInit, TestFun) ->
 					 {ok, P1}=rdb_dispatcher:start_link(),
 					 P1
 			 end,
-	Ledger=case whereis(ledger4test) of
-			   P when is_pid(P) -> false;
-			   undefined ->
-				   {ok, P}=ledger:start_link(
-							[{filename, "db/ledger_txtest"},
-               {name, ledger4test}]
-						   ),
-				   gen_server:call(P, '_flush'),
-				   gen_server:call(P, {put, LedgerInit}),
-				   P
-		   end,
+  DBPath="db/ledger_txtest",
+  Ledger=case whereis(ledger4test) of
+           P when is_pid(P) -> false;
+           undefined ->
+             {ok, P}=ledger:start_link(
+                       [{filename, DBPath},
+                        {name, ledger4test}]
+                      ),
+             gen_server:call(P, '_flush'),
+             gen_server:call(P, {put, LedgerInit}),
+             P
+         end,
 
-	Res=try
-			TestFun(Ledger)
-		after
-				  if Ledger == false -> ok;
-					 true -> gen_server:stop(Ledger, normal, 3000)
-				  end,
-				  if NeedStop==false -> ok;
-					 true -> gen_server:stop(NeedStop, normal, 3000)
-				  end
-		end,
-	Res.
+  Res=try
+        TestFun(Ledger)
+      after
+        if Ledger == false -> ok;
+           true -> gen_server:stop(Ledger, normal, 3000),
+                   gen_server:call(rdb_dispatcher,{close, DBPath})
+        end,
+        if NeedStop==false -> ok;
+           true -> gen_server:stop(NeedStop, normal, 3000)
+        end
+      end,
+  Res.
 
 %% ------------------------------------------------------------------
 %% Internal Function Definitions

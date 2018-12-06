@@ -48,6 +48,7 @@
 
 -module(blockvote).
 
+-compile([{parse_transform, stout_pt}]).
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).
 
@@ -55,7 +56,7 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([start_link/0]).
+-export([start_link/0, get_state/0]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -124,9 +125,10 @@ handle_cast({tpic, _From, #{
     lager:info("BV sig from other chain"),
     {noreply, State};
 
-handle_cast({signature, BlockHash, _Sigs}=WholeSig,
+handle_cast({signature, BlockHash, Sigs}=WholeSig,
             #{lastblock:=#{hash:=LBH}}=State) when LBH==BlockHash->
     lager:info("BV Got extra sig for ~s ~p", [blkid(BlockHash), WholeSig]),
+    stout:log(bv_gotsig, [{hash, BlockHash}, {sig, Sigs}, {extra, true}]),
     gen_server:cast(blockchain, WholeSig),
     {noreply, State};
 
@@ -136,18 +138,20 @@ handle_cast({signature, BlockHash, Sigs}, #{candidatesig:=Candidatesig}=State) -
     CSig0=maps:get(BlockHash, Candidatesig, #{}),
     CSig=checksig(BlockHash, Sigs, CSig0),
     %lager:debug("BV S CS2 ~p", [maps:keys(CSig)]),
+    stout:log(bv_gotsig, [{hash, BlockHash}, {sig, Sigs}, {extra, false}]),
     State2=State#{ candidatesig=>maps:put(BlockHash, CSig, Candidatesig) },
     {noreply, is_block_ready(BlockHash, State2)};
 
 handle_cast({new_block, #{hash:=BlockHash, sign:=Sigs}=Blk, _PID},
             #{ candidates:=Candidates,
-               candidatesig:=Candidatesig,
-               lastblock:=#{hash:=LBlockHash}=LastBlock
+               candidatesig:=Candidatesig
              }=State) ->
 
+    #{hash:=LBlockHash}=LastBlock=blockchain:last_meta(),
+    Height=maps:get(height, maps:get(header, Blk)),
     lager:info("BV New block (~p/~p) arrived (~s/~s)",
                [
-                maps:get(height, maps:get(header, Blk)),
+                Height,
                 maps:get(height, maps:get(header, LastBlock)),
                 blkid(BlockHash),
                 blkid(LBlockHash)
@@ -155,26 +159,20 @@ handle_cast({new_block, #{hash:=BlockHash, sign:=Sigs}=Blk, _PID},
     CSig0=maps:get(BlockHash, Candidatesig, #{}),
     CSig=checksig(BlockHash, Sigs, CSig0),
     %lager:debug("BV N CS2 ~p", [maps:keys(CSig)]),
+    stout:log(bv_gotblock, [{hash, BlockHash}, {sig, Sigs}, {height, Height}]),
     State2=State#{ candidatesig=>maps:put(BlockHash, CSig, Candidatesig),
                    candidates => maps:put(BlockHash, Blk, Candidates)
                  },
     {noreply, is_block_ready(BlockHash, State2)};
-
-handle_cast(blockchain_sync, State) ->
-    LastBlock=gen_server:call(blockchain, last_block),
-    Res=State#{
-      lastblock=>LastBlock
-     },
-    {noreply, Res};
 
 handle_cast(_Msg, State) ->
     lager:info("BV Unknown cast ~p", [_Msg]),
     {noreply, State}.
 
 handle_info(init, undefined) ->
-    LastBlock=gen_server:call(blockchain, last_block),
+    #{hash:=LBlockHash}=LastBlock=blockchain:last_meta(),
     lager:info("BV My last block hash ~s",
-               [bin2hex:dbin2hex(maps:get(hash, LastBlock))]),
+               [bin2hex:dbin2hex(LBlockHash)]),
     Res=#{
       candidatesig=>#{},
       candidates=>#{},
@@ -199,6 +197,8 @@ code_change(_OldVsn, State, _Extra) ->
 blkid(<<X:8/binary, _/binary>>) ->
     bin2hex:dbin2hex(X).
 
+%% ------------------------------------------------------------------
+
 checksig(BlockHash, Sigs, Acc0) ->
     lists:foldl(
       fun(Signature, Acc) ->
@@ -218,6 +218,8 @@ checksig(BlockHash, Sigs, Acc0) ->
                       Acc
               end
       end, Acc0, Sigs).
+
+%% ------------------------------------------------------------------
 
 is_block_ready(BlockHash, State) ->
 	try
@@ -266,11 +268,17 @@ is_block_ready(BlockHash, State) ->
 				Blk=Blk0#{sign=>Success},
 				%enough signs. use block
 				T3=erlang:system_time(),
+        Height=maps:get(height, maps:get(header, Blk)),
+        stout:log(bv_ready,
+                  [ {hash, BlockHash},
+                    {height, Height},
+                    {header, maps:get(header, Blk)}
+                  ]),
 				lager:info("BV enough confirmations. Installing new block ~s h= ~b (~.3f ms)",
-						   [blkid(BlockHash),
-							maps:get(height, maps:get(header, Blk)),
-							(T3-T0)/1000000
-						   ]),
+                   [blkid(BlockHash),
+                    Height,
+                    (T3-T0)/1000000
+                   ]),
 
 				gen_server:cast(blockchain, {new_block, Blk, self()}),
 				State#{
@@ -292,16 +300,23 @@ is_block_ready(BlockHash, State) ->
 			  State
 	end.
 
-load_settings(State) ->
-    MyChain=blockchain:get_mysettings(chain),
-    MinSig=chainsettings:get_val(minsig,1000),
-	LastBlock=gen_server:call(blockchain, last_block),
-    lager:info("BV My last block hash ~s",
-               [bin2hex:dbin2hex(maps:get(hash, LastBlock))]),
-    State#{
-      mychain=>MyChain,
-      minsig=>MinSig,
-      lastblock=>LastBlock
-     }.
+%% ------------------------------------------------------------------
 
+load_settings(State) ->
+  {ok, MyChain} = chainsettings:get_setting(mychain),
+  MinSig=chainsettings:get_val(minsig,1000),
+  LastBlock=blockchain:last_meta(),
+  %LastBlock=gen_server:call(blockchain, last_block),
+  lager:info("BV My last block hash ~s",
+             [bin2hex:dbin2hex(maps:get(hash, LastBlock))]),
+  State#{
+    mychain=>MyChain,
+    minsig=>MinSig,
+    lastblock=>LastBlock
+   }.
+
+%% ------------------------------------------------------------------
+
+get_state() ->
+  gen_server:call(?MODULE, state).
 

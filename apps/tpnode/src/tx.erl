@@ -48,10 +48,11 @@
 
 -module(tx).
 
--export([get_ext/2, set_ext/3, sign/2, verify/1, verify/2, pack/1, unpack/1]).
+-export([del_ext/2, get_ext/2, set_ext/3]).
+-export([sign/2, verify/1, verify/2, pack/1, pack/2, unpack/1, unpack/2]).
 -export([txlist_hash/1, rate/2, mergesig/2]).
--export([encode_purpose/1, decode_purpose/1, encode_kind/2, decode_kind/1,
-         construct_tx/1,construct_tx/2, get_payload/2]).
+-export([encode_purpose/1, decode_purpose/1, encode_kind/2, decode_kind/1]).
+-export([construct_tx/1,construct_tx/2, get_payload/2, get_payloads/2]).
 -export([hashdiff/1,upgrade/1]).
 
 -include("apps/tpnode/include/tx_const.hrl").
@@ -106,6 +107,13 @@ set_ext(K, V, Tx) ->
   Tx#{
     extdata=>maps:put(K, V, Ed)
    }.
+
+del_ext(K, Tx) ->
+  Ed=maps:get(extdata, Tx, #{}),
+  Tx#{
+    extdata=>maps:remove(K, Ed)
+   }.
+
 
 
 -spec to_list(Arg :: binary() | list()) -> list().
@@ -196,6 +204,43 @@ construct_tx(#{
 
 construct_tx(#{
   ver:=2,
+  kind:=deploy,
+  from:=F,
+  t:=Timestamp,
+  seq:=Seq,
+  payload:=Amounts
+ }=Tx0,_Params) ->
+  Tx=maps:with([ver,from,to,t,seq,payload,call,txext],Tx0),
+  A1=lists:map(
+       fun(#{amount:=Amount, cur:=Cur, purpose:=Purpose}) when
+             is_integer(Amount), is_binary(Cur) ->
+           [encode_purpose(Purpose), to_list(Cur), Amount]
+       end, Amounts),
+  Ext=maps:get(txext, Tx, #{}),
+  true=is_map(Ext),
+  E0=#{
+    "k"=>encode_kind(2,deploy),
+    "f"=>F,
+    "t"=>Timestamp,
+    "s"=>Seq,
+    "p"=>A1,
+    "e"=>Ext
+   },
+  {E1,Tx1}=case maps:find(call,Tx) of
+             {ok, #{function:=Fun,args:=Args}} when is_list(Fun),
+                                                    is_list(Args) ->
+               {E0#{"c"=>[Fun,{array,Args}]},Tx};
+             error ->
+               {E0#{"c"=>["init",{array,[]}]}, maps:remove(call, Tx)}
+           end,
+  Tx1#{
+    kind=>deploy,
+    body=>msgpack:pack(E1,[{spec,new},{pack_str, from_list}]),
+    sig=>[]
+   };
+
+construct_tx(#{
+  ver:=2,
   kind:=generic,
   from:=F,
   to:=To,
@@ -221,9 +266,9 @@ construct_tx(#{
     "e"=>Ext
    },
   {E1,Tx1}=case maps:find(call,Tx) of
-             {ok, #{function:=Fun,args:=Args}} when is_binary(Fun),
+             {ok, #{function:=Fun,args:=Args}} when is_list(Fun),
                                                     is_list(Args) ->
-               {E0#{"c"=>[Fun,Args]},Tx};
+               {E0#{"c"=>[Fun,{array,Args}]},Tx};
              _ ->
                {E0, maps:remove(call, Tx)}
            end,
@@ -253,31 +298,78 @@ unpack_body(#{body:=Body}=Tx) ->
       end
   end.
 
+unpack_addr(<<_:64/big>>=From,_) -> From;
+unpack_addr([_,_,_,_,_,_,_,_]=From,_) -> list_to_binary(From);
+unpack_addr(_,T) -> throw(T).
+
+unpack_timestamp(Time) when is_integer(Time) -> Time;
+unpack_timestamp(_Time) -> throw(bad_timestamp).
+
+unpack_seq(Int) when is_integer(Int) -> Int;
+unpack_seq(_Int) -> throw(bad_seq).
+
+%TODO: remove this temporary fix
+unpack_txext(<<>>) -> #{};
+unpack_txext(Map) when is_map(Map) -> Map;
+unpack_txext(_Any) -> throw(bad_ext).
+
+unpack_payload(Amounts) when is_list(Amounts) ->
+  lists:map(
+    fun([Purpose, Cur, Amount]) ->
+        if is_integer(Amount) -> ok;
+           true -> throw('bad_amount')
+        end,
+        #{amount=>Amount,
+          cur=>to_binary(Cur),
+          purpose=>decode_purpose(Purpose)
+         }
+    end, Amounts).
+
 unpack_body(#{ ver:=2,
-              kind:=generic
+              kind:=GenericOrDeploy
              }=Tx,
             #{ "f":=From,
                "to":=To,
                "t":=Timestamp,
                "s":=Seq,
-               "p":=Payload,
-               "e":=Extradata
-             }=Unpacked) ->
-  Amounts=lists:map(
-       fun([Purpose, Cur, Amount]) ->
-         #{amount=>Amount,
-           cur=>to_binary(Cur),
-           purpose=>decode_purpose(Purpose)
-          }
-       end, Payload),
+               "p":=Payload
+             }=Unpacked) when GenericOrDeploy == generic ; 
+                              GenericOrDeploy == deploy ->
+  Amounts=unpack_payload(Payload),
   Decoded=Tx#{
     ver=>2,
-    from=>From,
-    to=>To,
-    t=>Timestamp,
-    seq=>Seq,
+    from=>unpack_addr(From,bad_from),
+    to=>unpack_addr(To,bad_to),
+    t=>unpack_timestamp(Timestamp),
+    seq=>unpack_seq(Seq),
     payload=>Amounts,
-    txext=>Extradata
+    txext=>unpack_txext(maps:get("e", Unpacked, #{}))
+   },
+  case maps:is_key("c",Unpacked) of
+    false -> Decoded;
+    true ->
+      [Function, Args]=maps:get("c",Unpacked),
+      Decoded#{
+        call=>#{function=>Function, args=>Args}
+       }
+  end;
+
+unpack_body(#{ ver:=2,
+              kind:=deploy
+             }=Tx,
+            #{ "f":=From,
+               "t":=Timestamp,
+               "s":=Seq,
+               "p":=Payload
+             }=Unpacked) ->
+  Amounts=unpack_payload(Payload),
+  Decoded=Tx#{
+    ver=>2,
+    from=>unpack_addr(From,bad_from),
+    t=>unpack_timestamp(Timestamp),
+    seq=>unpack_seq(Seq),
+    payload=>Amounts,
+    txext=>unpack_txext(maps:get("e", Unpacked, #{}))
    },
   case maps:is_key("c",Unpacked) of
     false -> Decoded;
@@ -292,39 +384,24 @@ unpack_body(#{ ver:=2,
               kind:=register
              }=Tx,
             #{ "t":=Timestamp,
-               "e":=Extradata,
                "h":=Hash
-             }=_Unpacked) ->
+             }=Unpacked) ->
   Tx#{
     ver=>2,
-    t=>Timestamp,
+    t=>unpack_timestamp(Timestamp),
     keysh=>Hash,
-    txext=>Extradata
-   };
-
-unpack_body(#{ ver:=2,
-              kind:=register
-             }=Tx,
-            #{ "t":=Timestamp,
-               "h":=Hash
-             }=_Unpacked) ->
-  Tx#{
-    ver=>2,
-    t=>Timestamp,
-    keysh=>Hash,
-    txext=>#{}
+    txext=>unpack_txext(maps:get("e", Unpacked, #{}))
    };
 
 unpack_body(#{ ver:=2,
               kind:=patch
              }=Tx,
-            #{ "p":=Patches,
-               "e":=Extradata
-             }=_Unpacked) ->
+            #{ "p":=Patches
+             }=Unpacked) ->
   Tx#{
     ver=>2,
     patches=>Patches,
-    txext=>Extradata
+    txext=>unpack_txext(maps:get("e", Unpacked, #{}))
    };
 
 unpack_body(#{ver:=Ver, kind:=Kind},_Unpacked) ->
@@ -365,12 +442,12 @@ verify(Tx) ->
   {ok, tx()} | 'bad_sig'.
 
 verify(#{
-  kind:=generic,
+  kind:=GenericOrDeploy,
   from:=From,
   body:=Body,
   sig:=LSigs,
   ver:=2
- }=Tx, Opts) ->
+ }=Tx, Opts) when GenericOrDeploy==generic; GenericOrDeploy==deploy ->
   CI=get_ext(<<"contract_issued">>, Tx),
   Res=case checkaddr(From) of
         {true, _IAddr} when CI=={ok, From} ->
@@ -454,10 +531,20 @@ verify(#{
   body:=Body,
   sig:=LSigs,
   ver:=2
- }=Tx, _Opts) ->
-  Res=bsig:checksig(Body, LSigs),
+ }=Tx, Opts) ->
+  CheckFun=case lists:keyfind(settings,1,Opts) of
+             {_,Sets} ->
+               fun(PubKey,_) ->
+                   chainsettings:is_our_node(PubKey, Sets) =/= false
+               end;
+             false ->
+               fun(PubKey,_) ->
+                   chainsettings:is_our_node(PubKey) =/= false
+               end
+           end,
+  Res=bsig:checksig(Body, LSigs, CheckFun),
   case Res of
-    {0, _} ->
+    {[], _} ->
       bad_sig;
     {Valid, Invalid} when length(Valid)>0 ->
       {ok, Tx#{
@@ -471,17 +558,27 @@ verify(#{
   end;
 
 verify(Bin, Opts) when is_binary(Bin) ->
-  Tx=unpack(Bin),
-  verify(Tx, Opts);
+  MaxTxSize = proplists:get_value(maxsize, Opts, 0),
+  case size(Bin) of
+    _Size when MaxTxSize > 0 andalso _Size > MaxTxSize ->
+      tx_too_big;
+    _ ->
+      Tx = unpack(Bin),
+      verify(Tx, Opts)
+  end;
+
 
 verify(Struct, Opts) ->
   tx1:verify(Struct, Opts).
 
 -spec pack(tx()) -> binary().
 
+pack(Tx) ->
+  pack(Tx, []).
+
 pack(#{ ver:=2,
         body:=Bin,
-        sig:=PS}=Tx) ->
+        sig:=PS}=Tx, Opts) ->
   T=#{"ver"=>2,
       "body"=>Bin,
       "sig"=>PS
@@ -492,22 +589,33 @@ pack(#{ ver:=2,
        _ ->
          T
      end,
-  msgpack:pack(T1,[
+  T2=case lists:member(withext, Opts) andalso maps:is_key(extdata, Tx) of
+       false -> T1;
+       true ->
+         T1#{
+           "extdata" => maps:get(extdata,Tx)
+          }
+     end,
+  msgpack:pack(T2,[
                   {spec,new},
                   {pack_str, from_list}
                  ]);
 
-pack(Any) ->
+pack(Any, _) ->
   tx1:pack(Any).
 
 unpack(Tx) when is_map(Tx) ->
   Tx;
 
 unpack(BinTx) when is_binary(BinTx) ->
+  unpack(BinTx,[]).
+
+unpack(BinTx,Opts) when is_binary(BinTx), is_list(Opts) ->
   {ok, Tx0} = msgpack:unpack(BinTx, [{known_atoms,
                                       [type, sig, tx, patch, register,
                                        register, address, block ] },
                                      {unpack_str, as_binary}] ),
+  Trusted=lists:member(trusted, Opts),
   case Tx0 of
     #{<<"ver">>:=2, sig:=Sign, <<"body">>:=TxBody, <<"inv">>:=Inv} ->
       unpack_body( #{
@@ -517,11 +625,7 @@ unpack(BinTx) when is_binary(BinTx) ->
         inv=>Inv
        });
     #{<<"ver">>:=2, sig:=Sign, <<"body">>:=TxBody} ->
-      unpack_body( #{
-        ver=>2,
-        sig=>Sign,
-        body=>TxBody
-       });
+      unpack_generic(Trusted, Tx0, TxBody, Sign);
     #{<<"ver">>:=2, <<"sig">>:=Sign, <<"body">>:=TxBody, <<"inv">>:=Inv} ->
       unpack_body( #{
         ver=>2,
@@ -530,14 +634,33 @@ unpack(BinTx) when is_binary(BinTx) ->
         inv=>Inv
        });
     #{<<"ver">>:=2, <<"sig">>:=Sign, <<"body">>:=TxBody} ->
-      unpack_body( #{
-        ver=>2,
-        sig=>Sign,
-        body=>TxBody
-       });
+      unpack_generic(Trusted, Tx0, TxBody, Sign);
     _ ->
       tx1:unpack_mp(Tx0)
   end.
+
+unpack_generic(Trusted, Tx0, TxBody, Sign) ->
+  Ext=if Trusted ->
+           case maps:find(<<"extdata">>,Tx0) of
+             {ok, Val} ->
+               Val;
+             _ -> false
+           end;
+         true -> false
+      end,
+  unpack_body(
+    if Ext == false ->
+         #{ ver=>2,
+            sig=>Sign,
+            body=>TxBody
+          };
+       true ->
+         #{ extdata => Ext,
+            ver=>2,
+            sig=>Sign,
+            body=>TxBody
+          }
+    end).
 
 txlist_hash(List) ->
   crypto:hash(sha256,
@@ -548,6 +671,15 @@ txlist_hash(List) ->
                                      [Id, tx:pack(Tx)|Acc]
                                  end, [], lists:keysort(1, List)))).
 
+get_payload(#{ver:=2, kind:=deploy, payload:=Payload}=_Tx, Purpose) ->
+  lists:foldl(
+    fun(#{amount:=_,cur:=_,purpose:=P1}=A, undefined) when P1==Purpose ->
+        A;
+       (_,A) ->
+        A
+    end, undefined, Payload);
+
+
 get_payload(#{ver:=2, kind:=generic, payload:=Payload}=_Tx, Purpose) ->
   lists:foldl(
     fun(#{amount:=_,cur:=_,purpose:=P1}=A, undefined) when P1==Purpose ->
@@ -555,6 +687,18 @@ get_payload(#{ver:=2, kind:=generic, payload:=Payload}=_Tx, Purpose) ->
        (_,A) ->
         A
     end, undefined, Payload).
+
+get_payloads(#{ver:=2, kind:=deploy, payload:=Payload}=_Tx, Purpose) ->
+  lists:filter(
+    fun(#{amount:=_,cur:=_,purpose:=P1}) ->
+        P1==Purpose
+    end, Payload);
+
+get_payloads(#{ver:=2, kind:=generic, payload:=Payload}=_Tx, Purpose) ->
+  lists:filter(
+    fun(#{amount:=_,cur:=_,purpose:=P1}) ->
+        P1==Purpose
+    end, Payload).
 
 
 rate1(#{extradata:=ED}, Cur, TxAmount, GetRateFun) ->
@@ -590,12 +734,40 @@ rate(#{ver:=2, kind:=generic}=Tx, GetRateFun) ->
       _ ->
         case GetRateFun({params, <<"feeaddr">>}) of
           X when is_binary(X) ->
-            {false, #{ cost=>null } };
+            rate2(Tx, <<"none">>, 0, GetRateFun);
+            %{false, #{ cost=>null } };
           _ ->
-            {true, #{ cost=>0, tip => 0, cur=><<"NONE">> }}
+            {true, #{ cost=>0, tip => 0, cur=><<"none">> }}
         end
     end
   catch _:_ -> throw('cant_calculate_fee')
+  end;
+
+rate(#{ver:=2, kind:=deploy}=Tx, GetRateFun) ->
+  try
+    case get_payload(Tx, srcfee) of
+      #{cur:=Cur, amount:=TxAmount} ->
+        rate2(Tx, Cur, TxAmount, GetRateFun);
+      _ ->
+        case GetRateFun({params, <<"feeaddr">>}) of
+          X when is_binary(X) ->
+            {false, #{ cost=>null } };
+          _ ->
+            {true, #{ cost=>0, tip => 0, cur=><<"none">> }}
+        end
+    end
+  catch Ec:Ee -> 
+          file:write_file("tmp/rate.txt", [io_lib:format("~p.~n~p.~n", 
+                                                         [
+                                                          Tx,
+                                                          erlang:term_to_binary(GetRateFun)
+                                                         ])]),
+          S=erlang:get_stacktrace(),
+          lager:error("Calc fee error ~p tx ~p",[{Ec,Ee},Tx]),
+          lists:foreach(fun(SE) ->
+                            lager:error("@ ~p", [SE])
+                        end, S),
+          throw('cant_calculate_fee')
   end;
 
 
@@ -609,7 +781,8 @@ rate(#{cur:=TCur}=Tx, GetRateFun) ->
       _ ->
         case GetRateFun({params, <<"feeaddr">>}) of
           X when is_binary(X) ->
-            {false, #{ cost=>null } };
+            rate1(Tx, <<"none">>, 0, GetRateFun);
+%            {false, #{ cost=>null } };
           _ ->
             {true, #{ cost=>0, tip => 0, cur=>TCur }}
         end

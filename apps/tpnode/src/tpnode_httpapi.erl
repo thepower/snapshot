@@ -51,7 +51,9 @@
 -export([h/3, after_filter/1,
          prettify_block/2,
          prettify_block/1,
+         prettify_bal/2,
          prettify_tx/2,
+         postbatch/1,
          packer/2,
          binjson/1]).
 
@@ -191,6 +193,7 @@ h(<<"GET">>, [<<"node">>, <<"status">>], _Req) ->
     #{ result => <<"ok">>,
       status => #{
         nodeid=>nodekey:node_id(),
+        nodename=>nodekey:node_name(),
         public_key=>BinPacker(nodekey:get_pub()),
         blockchain=>#{
           chain=>Chain,
@@ -351,7 +354,106 @@ h(<<"GET">>, [<<"nodes">>, Chain], _Req) ->
         chain_nodes => get_nodes(binary_to_integer(Chain, 10))
     });
 
+h(<<"GET">>, [<<"address">>, TAddr, <<"state",F/binary>>|Path], _Req) ->
+  try
+    Addr=case TAddr of
+           <<"0x", Hex/binary>> -> hex:parse(Hex);
+           _ -> naddress:decode(TAddr)
+         end,
+    Ledger=ledger:get([Addr]),
+    case maps:is_key(Addr, Ledger) of
+      false ->
+          err(
+              10003,
+              <<"Not found">>,
+              #{result => <<"not_found">>},
+              #{http_code => 404}
+          );
+      true ->
+        Info=maps:get(Addr, Ledger),
+        State=maps:get(state, Info, <<>>),
+        case Path of
+          [] ->
+            lager:info("F ~p",[F]),
+            case F of <<>> ->
+                        {200, [{"Content-Type","binary/octet-stream"}], State};
+                      <<"json">> ->
+                        {ok,S}=msgpack:unpack(State),
+                        S1=maps:fold(
+                          fun(K,V,Acc) ->
+                              maps:put(
+                                base64:encode(K),
+                                base64:encode(V),
+                                Acc)
+                          end, #{
+                            notice => <<"Only for Sasha">>
+                           }, S),
+                        {200, [{"Content-Type","application/json"}], S1}
+            end;
+          [Key] ->
+            K=case Key of
+                   <<"0x", HexK/binary>> -> hex:parse(HexK);
+                   _ -> base64:decode(Key)
+                 end,
+            {ok,S}=msgpack:unpack(State),
+            Val=maps:get(K,S,<<>>),
+            {200, [{"Content-Type","binary/octet-stream"}], Val}
+        end
+    end
+  catch
+    throw:{error, address_crc} ->
+              err(
+                  10004,
+                  <<"Invalid address">>,
+                  #{result => <<"error">>},
+                  #{http_code => 400}
+              );
+          throw:bad_addr ->
+              err(
+                  10005,
+                  <<"Invalid address (2)">>,
+                  #{result => <<"error">>},
+                  #{http_code => 400}
+              )
+  end;
 
+
+h(<<"GET">>, [<<"address">>, TAddr, <<"code">>], _Req) ->
+  try
+    Addr=case TAddr of
+           <<"0x", Hex/binary>> -> hex:parse(Hex);
+           _ -> naddress:decode(TAddr)
+         end,
+    Ledger=ledger:get([Addr]),
+    case maps:is_key(Addr, Ledger) of
+      false ->
+          err(
+              10003,
+              <<"Not found">>,
+              #{result => <<"not_found">>},
+              #{http_code => 404}
+          );
+      true ->
+        Info=maps:get(Addr, Ledger),
+        Code=maps:get(code, Info, <<>>),
+        {200, [{"Content-Type","binary/octet-stream"}], Code}
+    end
+  catch
+    throw:{error, address_crc} ->
+              err(
+                  10004,
+                  <<"Invalid address">>,
+                  #{result => <<"error">>},
+                  #{http_code => 400}
+              );
+          throw:bad_addr ->
+              err(
+                  10005,
+                  <<"Invalid address (2)">>,
+                  #{result => <<"error">>},
+                  #{http_code => 400}
+              )
+  end;
 
 
 h(<<"GET">>, [<<"address">>, TAddr], _Req) ->
@@ -402,17 +504,10 @@ h(<<"GET">>, [<<"address">>, TAddr], _Req) ->
                       _ -> BinPacker(V)
                     end;
       (preblk, V) -> BinPacker(V);
-      (code, V) -> BinPacker(V);
-      (state, V) ->
-        try
-          iolist_to_binary(
-            io_lib:format("~p",
-                          [
-                           erlang:binary_to_term(V, [safe])])
-           )
-        catch _:_ ->
-                base64:encode(V)
-        end;
+      (view, View) ->
+                    [ list_to_binary(M) || M<- View];
+      (code, V) -> size(V);
+      (state, V) -> size(V);
       (_, V) -> V
                 end, Info1),
         Info3=try
@@ -450,13 +545,6 @@ h(<<"GET">>, [<<"address">>, TAddr], _Req) ->
               )
   end;
 
-h(<<"POST">>, [<<"test">>, <<"tx">>], Req) ->
-  {ok, ReqBody, _NewReq} = cowboy_req:read_body(Req),
-  answer(
-   #{ result => <<"ok">>,
-      address=>ReqBody
-    });
-
 h(<<"GET">>, [<<"blockinfo">>, BlockId], _Req) ->
   BinPacker=packer(_Req,hex),
   BlockHash0=if(BlockId == <<"last">>) -> last;
@@ -484,6 +572,45 @@ h(<<"GET">>, [<<"blockinfo">>, BlockId], _Req) ->
         })
   end;
 
+h(<<"GET">>, [<<"binblock">>, BlockId], _Req) ->
+  BlockHash0=if(BlockId == <<"last">>) -> last;
+               true -> hex:parse(BlockId)
+             end,
+  case gen_server:call(blockchain, {get_block, BlockHash0}) of
+    undefined ->
+        err(
+            10006,
+            <<"Not found">>,
+            #{result => <<"not_found">>},
+            #{http_code => 404}
+        );
+    GoodBlock ->
+      {200,
+       [{<<"content-type">>,<<"binary/tp-block">>}],
+       block:pack(GoodBlock)
+      }
+  end;
+
+h(<<"GET">>, [<<"txtblock">>, BlockId], _Req) ->
+  BlockHash0=if(BlockId == <<"last">>) -> last;
+               true -> hex:parse(BlockId)
+             end,
+  case gen_server:call(blockchain, {get_block, BlockHash0}) of
+    undefined ->
+        err(
+            10006,
+            <<"Not found">>,
+            #{result => <<"not_found">>},
+            #{http_code => 404}
+        );
+    GoodBlock ->
+      {200,
+       [{<<"content-type">>,<<"text/plain">>}],
+       iolist_to_binary(
+         io_lib:format("~p.~n",[GoodBlock])
+        )
+      }
+  end;
 
 h(<<"GET">>, [<<"block">>, BlockId], _Req) ->
   QS=cowboy_req:parse_qs(_Req),
@@ -528,7 +655,7 @@ h(<<"GET">>, [<<"block">>, BlockId], _Req) ->
   end;
 
 h(<<"GET">>, [<<"settings">>], _Req) ->
-  Settings=settings:clean_meta(blockchain:get_settings()),
+  Settings=settings:clean_meta(chainsettings:by_path([])),
   EHF=fun([{Type, Str}|Tokens],{parser, State, Handler, Stack}, Conf) ->
           Conf1=jsx_config:list_to_config(Conf),
           jsx_parser:resume([{Type, base64:encode(Str)}|Tokens],
@@ -556,9 +683,6 @@ h(<<"POST">>, [<<"register">>], Req) ->
                     pow=>maps:get(<<"pow">>,Body,<<>>),
                     timestamp=>maps:get(<<"timestamp">>,Body,0)
                   }),
-  %{TX0,
-  %gen_server:call(txpool, {register, TX0})
-  %}.
 
   case txpool:new_tx(BinTx) of
     {ok, Tx} ->
@@ -574,6 +698,7 @@ h(<<"POST">>, [<<"register">>], Req) ->
       ErrorMsg = iolist_to_binary(io_lib:format("bad_tx:~p", [Err])),
       Data =
        #{ result => <<"error">>,
+          notice => <<"method deprecated">>,
           pkey=>bin2hex:dbin2hex(PKey),
           tx=>base64:encode(BinTx),
           error => ErrorMsg
@@ -586,84 +711,35 @@ h(<<"POST">>, [<<"register">>], Req) ->
       )
   end;
 
-h(<<"POST">>, [<<"address">>], Req) ->
-  [Body]=apixiom:bodyjs(Req),
-  lager:debug("New tx from ~s: ~p", [Body]),
-  A=hd(Body),
-  R=naddress:encode(A),
-  answer(
-   #{ result => <<"ok">>,
-      r=> R
-    }
-  );
-
-h(<<"GET">>, [<<"emulation">>, <<"start">>], _Req) ->
-  R = case txgen:start_link() of
-        {ok, _} -> #{ok => true, res=> <<"Started">>};
-        {error, {already_started, _}} ->
-          case txgen:is_running() of
-            true -> #{ok => false, res=> <<"Already running">>};
-            false->
-              txgen:restart(),
-              #{ok => true, res=> <<"Started">>}
-          end;
-        _ -> #{ok => false, res=> <<"Error">>}
-      end,
-  answer(#{res => R});
-
 h(<<"GET">>, [<<"tx">>, <<"status">>, TxID], _Req) ->
   R=txstatus:get_json(TxID),
-    answer(#{res=>R});
+  answer(#{res=>R});
 
-h(<<"POST">>, [<<"tx">>, <<"debug">>], Req) ->
+h(<<"POST">>, [<<"tx">>, <<"batch">>], Req) ->
   {RemoteIP, _Port}=cowboy_req:peer(Req),
-  Body=apixiom:bodyjs(Req),
-  lager:info("New DEBUG from ~s: ~p", [inet:ntoa(RemoteIP), Body]),
-  BinTx=case maps:get(<<"tx">>, Body, undefined) of
-          <<"0x", BArr/binary>> ->
-            hex:parse(BArr);
-          Any ->
-            base64:decode(Any)
-        end,
-  Dbg=case maps:get(<<"debug">>, Body, undefined) of
-        <<"0x", BArr1/binary>> ->
-          hex:parse(BArr1);
-        Any1 ->
-          base64:decode(Any1)
-      end,
-  U=tx:unpack(BinTx),
-  lager:info("Debug TX ~p",[U]),
-  Dbg2=tx1:mkmsg(U),
-  lager:info("Debug1 ~p",[bin2hex:dbin2hex(Dbg)]),
-  lager:info("Debug2 ~p",[bin2hex:dbin2hex(Dbg2)]),
-  XBin=io_lib:format("~p",[U]),
-  XTx=case tx1:verify1(U) of
-        {ok, Tx} ->
-          io_lib:format("~p.~n",[Tx]);
-        Err ->
-          io_lib:format("~p.~n",[{error,Err}])
-      end,
-
-  lager:info("Res ~p",[#{
-               xtx=>iolist_to_binary(XTx),
-               dbg=>iolist_to_binary(XBin)
-              }]),
+  lager:debug("New batch from ~s", [inet:ntoa(RemoteIP)]),
+  {ok, ReqBody, _NewReq} = cowboy_req:read_body(Req),
+  R=postbatch(ReqBody),
   answer(
-   #{
-       xtx=>iolist_to_binary(XTx),
-       dbg=>iolist_to_binary(XBin)
-   }
-  );
+    #{ result => <<"ok">>,
+       reslist => R
+     }
+   );
 
 h(<<"POST">>, [<<"tx">>, <<"new">>], Req) ->
   {RemoteIP, _Port}=cowboy_req:peer(Req),
   Body=apixiom:bodyjs(Req),
   lager:debug("New tx from ~s: ~p", [inet:ntoa(RemoteIP), Body]),
-  BinTx=case maps:get(<<"tx">>, Body, undefined) of
-          <<"0x", BArr/binary>> ->
-            hex:parse(BArr);
-          Any ->
-            base64:decode(Any)
+  BinTx=if Body == undefined ->
+             {ok, ReqBody, _NewReq} = cowboy_req:read_body(Req),
+             ReqBody;
+           is_map(Body) ->
+             case maps:get(<<"tx">>, Body, undefined) of
+               <<"0x", BArr/binary>> ->
+                 hex:parse(BArr);
+               Any ->
+                 base64:decode(Any)
+             end
         end,
   %lager:info_unsafe("New tx ~p", [BinTx]),
   case txpool:new_tx(BinTx) of
@@ -708,6 +784,30 @@ filter_block(Block, Address) ->
 
 % ----------------------------------------------------------------------
 
+prettify_bal(V, BinPacker) ->
+  FixedBal=case maps:is_key(lastblk, V) of
+             false ->
+               maps:remove(ublk, V);
+             true ->
+               LastBlk=maps:get(lastblk, V),
+               maps:put(lastblk,
+                        BinPacker(LastBlk),
+                        maps:remove(ublk, V)
+                       )
+           end,
+  maps:map(
+    fun(pubkey, PubKey) ->
+        BinPacker(PubKey);
+       (state, PubKey) ->
+        BinPacker(PubKey);
+       (view, View) ->
+        [ list_to_binary(M) || M<- View];
+       (code, PubKey) ->
+        BinPacker(PubKey);
+       (_BalKey, BalVal) ->
+        BalVal
+    end, FixedBal).
+
 prettify_block(Block) ->
   prettify_block(Block, fun(Bin) -> bin2hex:dbin2hex(Bin) end).
 
@@ -722,26 +822,7 @@ prettify_block(#{}=Block0, BinPacker) ->
        (bals, Bal) ->
         maps:fold(
           fun(BalAddr, V, A) ->
-              FixedBal=case maps:is_key(lastblk, V) of
-                         false ->
-                           maps:remove(ublk, V);
-                         true ->
-                           LastBlk=maps:get(lastblk, V),
-                           maps:put(lastblk,
-                                    BinPacker(LastBlk),
-                                    maps:remove(ublk, V)
-                                   )
-                       end,
-              PrettyBal=maps:map(
-                          fun(pubkey, PubKey) ->
-                              BinPacker(PubKey);
-                             (state, PubKey) ->
-                              BinPacker(PubKey);
-                             (code, PubKey) ->
-                              BinPacker(PubKey);
-                             (_BalKey, BalVal) ->
-                              BalVal
-                          end, FixedBal),
+              PrettyBal=prettify_bal(V,BinPacker),
               maps:put(BinPacker(BalAddr), PrettyBal, A)
           end, #{}, Bal);
        (header, BlockHeader) ->
@@ -781,9 +862,7 @@ prettify_block(#{}=Block0, BinPacker) ->
        (tx_proof, Proof) ->
         lists:map(
           fun({CHdr, CBody}) ->
-              {CHdr,
-               [BinPacker(H) || H<-tuple_to_list(CBody)]
-              }
+              {CHdr, prettify_mproof(CBody,BinPacker)}
           end,
           Proof
          );
@@ -799,7 +878,21 @@ prettify_block(#{}=Block0, BinPacker) ->
 prettify_block(#{hash:=<<0, 0, 0, 0, 0, 0, 0, 0>>}=Block0, BinPacker) ->
   Block0#{ hash=>BinPacker(<<0:64/big>>) }.
 
+prettify_mproof(M, BinPacker) ->
+  lists:map(
+    fun(E) when is_binary(E) -> BinPacker(E);
+       (E) when is_tuple(E) -> prettify_mproof(E, BinPacker);
+       (E) when is_list(E) -> prettify_mproof(E, BinPacker)
+    end,
+    if is_tuple(M) ->
+         tuple_to_list(M);
+       is_list(M) ->
+         M
+    end).
+
 % ----------------------------------------------------------------------
+str2bin(List) when is_list(List) ->
+  unicode:characters_to_binary(List).
 
 prettify_tx(#{ver:=2}=TXB, BinPacker) ->
   maps:map(
@@ -811,6 +904,10 @@ prettify_tx(#{ver:=2}=TXB, BinPacker) ->
         BinPacker(Val);
        (keysh, Val) ->
         BinPacker(Val);
+       (call, Val) ->
+         Bin=msgpack:pack(Val),
+         {ok, R}=msgpack:unpack(Bin,[{spec,new},{unpack_str, as_binary}]),
+         R;
        (sigverify, Fields) ->
         maps:map(
           fun(pubkeys, Val) ->
@@ -826,12 +923,14 @@ prettify_tx(#{ver:=2}=TXB, BinPacker) ->
               (K2,V2,Acc) ->
               [{K2,V2}|Acc]
           end, [], V1);
+       (txext, <<>>) -> %TODO: remove this temporary fix
+        #{};
        (txext, V1) ->
         maps:fold(
           fun(K2,V2,Acc) when is_list(K2), is_list(V2) ->
-              [{list_to_binary(K2),list_to_binary(V2)}|Acc];
+              [{str2bin(K2),str2bin(V2)}|Acc];
              (K2,V2,Acc) when is_list(K2) ->
-              [{list_to_binary(K2),V2}|Acc];
+              [{str2bin(K2),V2}|Acc];
               (K2,V2,Acc) when is_binary(K2) ->
               [{K2,V2}|Acc]
           end, [], V1);
@@ -905,7 +1004,7 @@ get_nodes(Chain) when is_integer(Chain) ->
 
 %%    io:format("Nodes: ~p~n", [Nodes]),
 %%    io:format("NodesHttps: ~p~n", [NodesHttps]),
-  
+
     % sanitize data types
     Nodes1 = lists:map(
         fun(Addr) when is_map(Addr) ->
@@ -924,9 +1023,9 @@ get_nodes(Chain) when is_integer(Chain) ->
         end,
       NodesHttps ++ Nodes
     ),
-  
+
 %%    io:format("nodes1: ~p~n", [Nodes1]),
-  
+
     AddToList =
         fun(List, NewItem) ->
             case NewItem of
@@ -947,10 +1046,10 @@ get_nodes(Chain) when is_integer(Chain) ->
                 <<"apis">> -> <<"https">>;
                 _ -> unknown
               end,
-  
+
             Host = add_proto(Host0, Proto),
             Ip = add_proto(Ip0, Proto),
-          
+
             case maps:get(nodeid, Addr, unknown) of
                 unknown -> NodeMap;
                 NodeId ->
@@ -992,7 +1091,7 @@ remove_duplicates(NodeMap) ->
           (_, V) ->
             V
         end,
-      
+
       maps:map(Sorter, KeyMap)
     end,
   maps:map(Worker, NodeMap).
@@ -1069,4 +1168,16 @@ binjson(Term) ->
      Term,
      [ strict, {error_handler, EHF} ]
     ).
+
+postbatch(<<>>) ->
+  [];
+
+postbatch(<<Size:32/big,Body:Size/binary,Rest/binary>>) ->
+  case txpool:new_tx(Body) of
+    {ok, Tx} ->
+      [Tx | postbatch(Rest) ];
+    {error, Err} ->
+      lager:info("error ~p", [Err]),
+      [iolist_to_binary(io_lib:format("bad_tx:~p", [Err])) | postbatch(Rest)]
+  end.
 

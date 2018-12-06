@@ -46,93 +46,44 @@
 %%%
 %%% END OF TERMS AND CONDITIONS
 
--module(utils).
+-module(vm_wasm).
+-export([run/0,run/2,client/2,loop/1,start_link/0]).
 
--export([alloc_tcp_port/0,make_binary/1, make_list/1, apply_macro/2, print_error/4]).
+run(Host, Port) ->
+  spawn(?MODULE,client,[Host, Port]).
 
--export([logger/1, logger/2]).
+run() ->
+  {ok,Port}=application:get_env(tpnode, vmport),
+  spawn(?MODULE,client,["127.0.0.1", Port]).
 
-alloc_tcp_port() ->
-  {ok,S}=gen_tcp:listen(0,[]),
-  {ok,{_,CPort}}=inet:sockname(S),
-  gen_tcp:close(S),
-  CPort.
+start_link() ->
+  Pid=run(),
+  link(Pid),
+  {ok,Pid}.
 
-%% -------------------------------------------------------------------------------------
+client(Host, Port) ->
+  Executable="wanode",
+  case os:find_executable(Executable,code:priv_dir(wanode)) of
+    false ->
+      lager:error("Can't find ~s",[Executable]);
+    Path when is_list(Path) ->
+      Handle=erlang:open_port(
+             {spawn_executable, Path},
+             [{args, ["-h",Host,"-p",integer_to_list(Port)]}, 
+              eof,
+              stderr_to_stdout
+             ]
+            ),
+      State=#{ port=>Handle },
+      loop(State)
+  end.
 
-make_binary(Arg) when is_binary(Arg) ->
-  Arg;
+loop(#{port:=Handle}=State) ->
+  receive
+    {Handle, {data, Msg}} ->
+      lager:info("Log ~ts",[Msg]),
+      loop(State);
+    {Handle, eof} ->
+      lager:error("Port went down ~p",[Handle])
+  end.
 
-make_binary(Arg) when is_list(Arg) ->
-  list_to_binary(Arg);
-
-make_binary(Arg) when is_atom(Arg) ->
-  atom_to_binary(Arg, utf8);
-
-make_binary(_Arg) ->
-  throw(badarg).
-
-
-%% -------------------------------------------------------------------------------------
-
-make_list(Arg) when is_list(Arg) ->
-  Arg;
-
-make_list(Arg) when is_binary(Arg) ->
-  binary_to_list(Arg);
-
-make_list(Arg) when is_atom(Arg) ->
-  atom_to_list(Arg);
-
-make_list(_Arg) ->
-  throw(badarg).
-
-
-%% -------------------------------------------------------------------------------------
-
-apply_macro(MapWithMacro, Dict) when is_map(MapWithMacro) andalso is_map(Dict) ->
-  Worker =
-    fun(DictKey, DictValue, SrcMap) ->
-      maps:map(
-        fun(_K, V) ->
-          case V of
-            DictKey -> DictValue;
-            _ -> V
-          end
-        end, SrcMap)
-    end,
-  maps:fold(Worker, MapWithMacro, Dict).
-
-%% -------------------------------------------------------------------------------------
-
-print_error(Message, Ec, Ee, StackTrace) ->
-  lager:error(make_list(Message) ++ " [~p:~p]", [Ec, Ee]),
-  lists:foreach(
-    fun(Where) -> lager:error("@ ~p", [Where]) end,
-    StackTrace
-  ).
-
-%% -------------------------------------------------------------------------------------
-
-logger(Format) when is_list(Format) ->
-  logger(Format, []).
-
-logger(Format, Args) when is_list(Format), is_list(Args) ->
-  StrTime = now_str(),
-  io:format(
-    StrTime ++ " " ++ Format ++ "~n",
-    Args).
-
-
-% -----------------------------------------------------------------------------
-%% pretty print timestamp from lager/src/lager_utils.erl
-now_str() ->
-  {_, _, Micro} = Now = os:timestamp(),
-  {Date, {Hours, Minutes, Seconds}} = calendar:now_to_local_time(Now),
-  now_str({Date, {Hours, Minutes, Seconds, Micro div 1000 rem 1000}}).
-
-now_str({{Y, M, D}, {H, Mi, S, Ms}}) ->
-  lists:flatten(io_lib:format(
-    "~p-~2..0p-~2..0p ~2..0p:~2..0p:~2..0p.~3..0p",
-    [Y, M, D, H, Mi, S, Ms]
-  )).

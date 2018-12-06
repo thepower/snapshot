@@ -62,15 +62,15 @@ cast(TPIC, Service, Message) when is_binary(Service) ->
 cast(TPIC, Conn, Message) when is_tuple(Conn) ->
     gen_server:cast(TPIC, {unicast, self(), Conn, Message}).
 
-call(TPIC, Conn, Request) ->
+call(TPIC, Conn, Request) -> 
     call(TPIC, Conn, Request, 2000).
 
-call(TPIC, Service, Request, Timeout) when is_binary(Service) ->
+call(TPIC, Service, Request, Timeout) when is_binary(Service) -> 
     R=gen_server:call(TPIC,{broadcast, self(), Service, Request}),
     T2=erlang:system_time(millisecond)+Timeout,
     lists:reverse(wait_response(T2,R,[]));
 
-call(TPIC, Conn, Request, Timeout) when is_tuple(Conn) ->
+call(TPIC, Conn, Request, Timeout) when is_tuple(Conn) -> 
     R=gen_server:call(TPIC,{unicast, self(), Conn, Request}),
     T2=erlang:system_time(millisecond)+Timeout,
     lists:reverse(wait_response(T2,R,[])).
@@ -87,7 +87,7 @@ wait_response(Until,[{_,_,R1x}=R1|RR],Acc) ->
     T=if(T1>0) -> T1;
         true -> 0
       end,
-    receive
+    receive 
         {'$gen_cast',{tpic,{_,_,R1x},A}} ->
             lager:debug("Got reply from ~p",[R1]),
             wait_response(Until,RR,[{R1,A}|Acc])
