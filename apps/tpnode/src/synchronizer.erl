@@ -144,6 +144,9 @@ handle_info(ticktimer,
           lager:info("Bad mkblock_delay ~p",[Any]),
           200
       end,
+  
+  stout:log(sync_ticktimer, [{node, nodekey:node_name()}]),
+  
   case maps:get(bcready, State, false) of
     true ->
       if MBD<0 ->

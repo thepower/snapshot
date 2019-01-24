@@ -51,7 +51,6 @@
 %% @end
 %%%-------------------------------------------------------------------
 -module(tpnode_vmproto).
--create_date("2018-08-15").
 
 -behaviour(ranch_protocol).
 

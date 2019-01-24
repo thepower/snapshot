@@ -51,7 +51,6 @@
 %% @end
 %%%-------------------------------------------------------------------
 -module(tpnode_vmsrv).
--create_date("2018-08-15").
 
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).

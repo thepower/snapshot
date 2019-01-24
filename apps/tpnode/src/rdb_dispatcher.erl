@@ -51,7 +51,6 @@
 %% @end
 %%%-------------------------------------------------------------------
 -module(rdb_dispatcher).
--create_date("2018-02-13").
 
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).

@@ -55,6 +55,7 @@
          is_our_node/2,
          settings_to_ets/1,
          all/0, by_path/1]).
+-export([checksum/0]).
 
 is_our_node(PubKey, Settings) ->
   KeyDB=maps:get(keys, Settings, #{}),
@@ -142,6 +143,12 @@ settings_to_ets(NewSettings) ->
 get_val(Name) ->
   get_val(Name, undefined).
 
+get_val(mychain, Def) ->
+  case ets:lookup(blockchain,mychain) of
+    [{mychain,X}] -> X;
+    _ -> Def
+  end;
+
 get_val(Name, Default) when Name==minsig; Name==patchsig ->
   Val=by_path([<<"current">>,chain,Name]),
   if is_integer(Val) -> Val;
@@ -205,3 +212,9 @@ get(Name, Sets, GetChain) ->
        end
   end.
 
+
+
+
+checksum() ->
+  Settings = all(),
+  Settings.
