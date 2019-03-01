@@ -64,6 +64,9 @@
          chainstate/0,
          blkid/1,
          rel/2,
+         receive_block/2,
+         send_block_real/4,
+         tpiccall/3,
          exists/1]).
 
 %% ------------------------------------------------------------------
@@ -415,6 +418,42 @@ handle_call(restoreset, _From, #{ldb:=LDB}=State) ->
   notify_settings(),
   {reply, S1, State#{settings=>chainsettings:settings_to_ets(S1)}};
 
+handle_call(rollback, _From, #{
+                        pre_settings:=PreSets,
+                        btable:=BTable,
+                        lastblock:=#{header:=#{parent:=Parent}},
+                        ldb:=LDB}=State) ->
+  case block_rel(LDB, Parent, self) of
+    Error when is_atom(Error) ->
+      {reply, {error, Error}, State};
+    #{hash:=H}=Blk ->
+      LH=block:ledger_hash(Blk),
+      case gen_server:call(ledger,{rollback, LH}) of
+        {ok, LH} ->
+          save_block(LDB, maps:remove(child,Blk), true),
+          chainsettings:settings_to_ets(PreSets),
+          lastblock2ets(BTable, Blk),
+          {reply,
+           {ok, H},
+           maps:without(
+             [pre_settings,tmpblock],
+             State#{
+               lastblock=>Blk,
+               settings=>PreSets
+              }
+            )
+          };
+        {error, Err} ->
+          {reply, {ledger_error, Err}, State}
+      end
+  end;
+
+handle_call(rollback, _From, #{
+                        btable:=_,
+                        lastblock:=_,
+                        ldb:=_}=State) ->
+  {reply, {error, no_prev_state}, State};
+
 handle_call({new_block, #{hash:=BlockHash,
                           header:=#{height:=Hei}=Header}=Blk, PID}=_Message,
             _From,
@@ -494,7 +533,7 @@ handle_call({new_block, #{hash:=BlockHash,
                   }
              end,
         SigLen=length(maps:get(sign, MBlk)),
-        lager:info("Signs ~p", [Success]),
+        lager:debug("Signs ~p", [Success]),
         MinSig=getset(minsig,State),
         lager:info("Sig ~p ~p", [SigLen, MinSig]),
         if SigLen>=MinSig ->
@@ -502,6 +541,28 @@ handle_call({new_block, #{hash:=BlockHash,
              Header=maps:get(header, Blk),
              %enough signs. Make block.
              NewPHash=maps:get(parent, Header),
+
+             if LBlockHash=/=NewPHash ->
+                  stout:log(sync_needed, [
+                                          {temp, maps:get(temporary,Blk,false)},
+                                          {hash, BlockHash},
+                                          {phash, NewPHash},
+                                          {lblockhash, LBlockHash},
+                                          {sig, SigLen},
+                                          {node, nodekey:node_name()},
+                                          {height,maps:get(height, maps:get(header, Blk))}
+                                         ]),
+                  lager:info("Probably I need to resynchronize, height ~p/~p new block parent ~s, but my ~s",
+                             [
+                              maps:get(height, maps:get(header, Blk)),
+                              maps:get(height, maps:get(header, LastBlock)),
+                              blkid(NewPHash),
+                              blkid(LBlockHash)
+                             ]),
+                  throw({error,need_sync});
+                true ->
+                  ok
+             end,
              if IsTemp ->
                   stout:log(accept_block,
                               [
@@ -529,27 +590,6 @@ handle_call({new_block, #{hash:=BlockHash,
                   {reply, ok, State#{
                                 tmpblock=>MBlk
                                }};
-                LBlockHash=/=NewPHash ->
-                  stout:log(sync_needed, [
-                    {temp, maps:get(temporary,Blk,false)},
-                    {hash, BlockHash},
-                    {phash, NewPHash},
-                    {lblockhash, LBlockHash},
-                    {sig, SigLen},
-                    {node, nodekey:node_name()},
-                    {height,maps:get(height, maps:get(header, Blk))}
-                  ]),
-                  lager:info("Need resynchronize, height ~p/~p new block parent ~s, but my ~s",
-                             [
-                              maps:get(height, maps:get(header, Blk)),
-                              maps:get(height, maps:get(header, LastBlock)),
-                              blkid(NewPHash),
-                              blkid(LBlockHash)
-                             ]),
-                  {reply, {error,need_sync}, (State#{ %run_sync
-                               candidates=>#{}
-                              })
-                  };
                 true ->
                   %normal block installation
                   {ok, LHash}=apply_ledger(check, MBlk),
@@ -614,14 +654,6 @@ handle_call({new_block, #{hash:=BlockHash,
                   gen_server:cast(txqueue, {done, proplists:get_keys(Settings)}),
 
                   T3=erlang:system_time(),
-                  stout:log(accept_block,
-                              [
-                               {temp, false},
-                               {hash, BlockHash},
-                               {sig, SigLen},
-                               {node, nodekey:node_name()},
-                               {height,maps:get(height, maps:get(header, Blk))}
-                              ]),
                   lager:info("enough confirmations ~w/~w. Installing new block ~s h= ~b (~.3f ms)/(~.3f ms)",
                              [
                               SigLen, MinSig,
@@ -634,7 +666,25 @@ handle_call({new_block, #{hash:=BlockHash,
 
                   gen_server:cast(tpnode_ws_dispatcher, {new_block, MBlk}),
 
-                  apply_ledger(put, MBlk),
+                  {ok, LH1} = apply_ledger(put, MBlk),
+                  if(LH1 =/= LHash) ->
+                      lager:error("Ledger error, hash mismatch on check and put"),
+                      lager:error("Database corrupted");
+                    true ->
+                      ok
+                  end,
+
+                  stout:log(accept_block,
+                            [
+                             {temp, false},
+                             {hash, BlockHash},
+                             {sig, SigLen},
+                             {node, nodekey:node_name()},
+                             {height,maps:get(height, maps:get(header, Blk))},
+                             {ledger_hash_actual, LH1},
+                             {ledger_hash_checked, LHash}
+                            ]),
+
 
                   maps:fold(
                     fun(ChainID, OutBlock, _) ->
@@ -682,6 +732,7 @@ handle_call({new_block, #{hash:=BlockHash,
                                 prevblock=> NewLastBlock,
                                 lastblock=> MBlk,
                                 unksig => 0,
+                                pre_settings => Sets,
                                 settings=>if Sets==Sets1 ->
                                                Sets;
                                              true ->
@@ -690,7 +741,6 @@ handle_call({new_block, #{hash:=BlockHash,
                                 candidates=>#{}
                                }
                   }
-
              end;
            true ->
              %not enough
@@ -705,6 +755,8 @@ handle_call({new_block, #{hash:=BlockHash,
     end
   catch throw:ignore ->
           {reply, {ok, ignore}, State};
+        throw:{error, Descr} ->
+          {reply, {error, Descr}, State};
         Ec:Ee ->
           S=erlang:get_stacktrace(),
           lager:error("BC new_block error ~p:~p", [Ec, Ee]),
@@ -746,6 +798,19 @@ handle_cast({tpic, Origin, #{null:=<<"pick_block">>,
   Map = #{null => <<"block">>, req => #{<<"hash">> => Hash, <<"rel">> => MyRel}},
   send_block(tpic, Origin, Map, BlockParts),
   {noreply, State};
+
+handle_cast({tpic, Origin, #{null:=<<"pick_block">>,
+                                <<"hash">>:=Hash,
+                                <<"rel">>:=<<"child">>
+                            }},
+            #{tmpblock:=#{header:=#{parent:=Hash}}=TmpBlk} = State) ->
+  BinBlock=block:pack(TmpBlk),
+  lager:info("I was asked for ~s for blk ~s: ~p",[child,blkid(Hash),TmpBlk]),
+  BlockParts = block:split_packet(BinBlock),
+  Map = #{null => <<"block">>, req => #{<<"hash">> => Hash, <<"rel">> => child}},
+  send_block(tpic, Origin, Map, BlockParts),
+  {noreply, State};
+
 
 handle_cast({tpic, Origin, #{null:=<<"pick_block">>,
                                 <<"hash">>:=Hash,
@@ -1211,8 +1276,7 @@ handle_info(
   runsync,
   #{
     lastblock:=#{header:=#{height:=MyHeight0}, hash:=MyLastHash}
-  } = State) ->
-  flush_checksync(),
+   } = State) ->
   MyHeight = case maps:get(tmpblock, State, undefined) of
                undefined -> MyHeight0;
                #{header:=#{height:=TmpHeight}} ->
@@ -1222,54 +1286,82 @@ handle_info(
   lager:debug("got runsync, myHeight: ~p, myLastHash: ~p", [MyHeight, blkid(MyLastHash)]),
 
   GetDefaultCandidates =
-    fun() ->
+  fun() ->
       lager:debug("use default list of candidates"),
       lists:reverse(
         tpiccall(<<"blockchain">>,
-          #{null=><<"sync_request">>},
-          [last_hash, last_height, chain, last_temp]
-        ))
-    end,
+                 #{null=><<"sync_request">>},
+                 [last_hash, last_height, chain, last_temp]
+                ))
+  end,
 
   Candidates =
-    case maps:get(sync_candidates, State, default) of
-      default ->
-        GetDefaultCandidates();
-      [] ->
-        GetDefaultCandidates();
-      SavedCandidates ->
-        lager:debug("use saved list of candidates"),
-        SavedCandidates
-    end,
+  case maps:get(sync_candidates, State, default) of
+    default ->
+      GetDefaultCandidates();
+    [] ->
+      GetDefaultCandidates();
+    SavedCandidates ->
+      lager:debug("use saved list of candidates"),
+      SavedCandidates
+  end,
 
-  lager:debug("runsync candidates: ~p", [Candidates]),
-  case
-    lists:foldl( %first suitable will be the quickest
-      fun({CHandler, #{chain:=_HisChain,
-        last_hash:=_,
-        last_height:=_,
-        null:=<<"sync_available">>} = CInfo}, undefined) ->
-        {CHandler, CInfo};
-        ({_, _}, undefined) ->
-          undefined;
-        ({_, _}, {AccH, AccI}) ->
-          {AccH, AccI}
-      end,
-      undefined,
-      Candidates
-    )
-  of
+  handle_info({runsync, Candidates}, State);
+
+handle_info(
+  {runsync, Candidates},
+  #{
+    lastblock:=#{header:=#{height:=MyHeight0}, hash:=MyLastHash}
+  } = State) ->
+  flush_checksync(),
+
+  MyHeight = case maps:get(tmpblock, State, undefined) of
+               undefined -> MyHeight0;
+               #{header:=#{height:=TmpHeight}} ->
+                 TmpHeight
+             end,
+
+  Candidate=lists:foldl( %first suitable will be the quickest
+              fun({CHandler, undefined}, undefined) ->
+                  Inf=tpiccall(CHandler,
+                               #{null=><<"sync_request">>},
+                               [last_hash, last_height, chain, last_temp]
+                              ),
+                  case Inf of
+                    {CHandler, #{chain:=_HisChain,
+                                 last_hash:=_,
+                                 last_height:=_,
+                                 null:=<<"sync_available">>} = CInfo} ->
+                      {CHandler, CInfo};
+                    _ ->
+                      undefined
+                  end;
+                 ({CHandler, #{chain:=_HisChain,
+                               last_hash:=_,
+                               last_height:=_,
+                               null:=<<"sync_available">>} = CInfo}, undefined) ->
+                  {CHandler, CInfo};
+                 ({_, _}, undefined) ->
+                  undefined;
+                 ({_, _}, {AccH, AccI}) ->
+                  {AccH, AccI}
+              end,
+              undefined,
+              Candidates
+             ),
+  lager:info("runsync candidates: ~p", [proplists:get_keys(Candidates)]),
+  case Candidate of
     undefined ->
       lager:notice("No candidates for sync."),
       {noreply, maps:without([sync, syncblock, syncpeer, sync_candidates], State#{unksig=>0})};
 
     {Handler,
-      #{
-        chain:=_Ch,
-        last_hash:=_,
-        last_height:=Height,
-        last_temp:=Tmp,
-        null:=<<"sync_available">>
+     #{
+       chain:=_Ch,
+       last_hash:=_,
+       last_height:=Height,
+       last_temp:=Tmp,
+       null:=<<"sync_available">>
       } = Info
     } ->
       lager:debug("chosen sync candidate info: ~p", [Info]),
@@ -1295,31 +1387,31 @@ handle_info(
               {ok, #{temporary:=TmpNo}} -> TmpNo
             end,
       lager:info("Found candidate h=~w my ~w, bb ~s inst ~s/~s",
-        [Height, MyHeight, ByBlock, Inst0, Inst]),
+                 [Height, MyHeight, ByBlock, Inst0, Inst]),
       if (Height == MyHeight andalso Tmp == MyTmp) ->
-        lager:info("Sync done, finish."),
-        notify_settings(),
-        {noreply,
-          maps:without([sync, syncblock, syncpeer, sync_candidates], State#{unksig=>0})
-        };
-        Inst == true ->
-          % try instant sync;
-          gen_server:call(ledger, '_flush'),
-          ledger_sync:run_target(tpic, Handler, ledger, undefined),
-          {noreply, State#{
-            sync=>inst,
-            syncpeer=>Handler,
-            sync_candidates => Candidates
-          }};
-        true ->
-          %try block by block
-          lager:error("RUN bbyb sync since ~s", [blkid(MyLastHash)]),
-          self() ! {bbyb_sync, MyLastHash},
-          {noreply, State#{
-            sync=>bbyb,
-            syncpeer=>Handler,
-            sync_candidates => Candidates
-          }}
+           lager:info("Sync done, finish."),
+           notify_settings(),
+           {noreply,
+            maps:without([sync, syncblock, syncpeer, sync_candidates], State#{unksig=>0})
+           };
+         Inst == true ->
+           % try instant sync;
+           gen_server:call(ledger, '_flush'),
+           ledger_sync:run_target(tpic, Handler, ledger, undefined),
+           {noreply, State#{
+                       sync=>inst,
+                       syncpeer=>Handler,
+                       sync_candidates => Candidates
+                      }};
+         true ->
+           %try block by block
+           lager:error("RUN bbyb sync since ~s", [blkid(MyLastHash)]),
+           self() ! {bbyb_sync, MyLastHash},
+           {noreply, State#{
+                       sync=>bbyb,
+                       syncpeer=>Handler,
+                       sync_candidates => Candidates
+                      }}
       end
   end;
 
@@ -1369,15 +1461,20 @@ flush_checksync() ->
           done
   end.
 
-send_block(TPIC, PeerID, Map, [BlockHead|BlockTail]) when BlockTail =:= [] ->
+
+send_block(TPIC, PeerID, Map, Arr) ->
+  spawn(?MODULE,send_block_real,[TPIC, PeerID, Map, Arr]),
+  ok.
+
+send_block_real(TPIC, PeerID, Map, [BlockHead]) ->
     tpic:cast(TPIC, PeerID, msgpack:pack(maps:merge(Map, #{block => BlockHead})));
-send_block(TPIC, PeerID, Map, [BlockHead|BlockTail]) ->
+send_block_real(TPIC, PeerID, Map, [BlockHead|BlockTail]) ->
     tpic:cast(TPIC, PeerID, msgpack:pack(maps:merge(Map, #{block => BlockHead}))),
     receive
         {'$gen_cast', {TPIC, PeerID, Bin}} ->
             case msgpack:unpack(Bin) of
                 {ok, #{null := <<"pick_next_part">>}} ->
-                    send_block(TPIC, PeerID, Map, BlockTail);
+                    send_block_real(TPIC, PeerID, Map, BlockTail);
                 {error, _} ->
                     error
             end;
@@ -1405,6 +1502,12 @@ receive_block(Handler, BlockPart, Acc) ->
                 receive_block(Handler, NewBlockPart, NewAcc);
               [] ->
                 lager:notice("Broken sync"),
+                stout:log(runsync,
+                  [
+                    {node, nodekey:node_name()},
+                    {error, broken_sync}
+                  ]),
+                
                 throw('broken_sync')
             end
     end.
@@ -1483,7 +1586,11 @@ apply_block_conf(Block, Conf0) ->
     end, Conf0, S).
 
 blkid(<<X:8/binary, _/binary>>) ->
-    binary_to_list(bin2hex:dbin2hex(X)).
+    binary_to_list(bin2hex:dbin2hex(X));
+
+blkid(X) ->
+  binary_to_list(bin2hex:dbin2hex(X)).
+
 
 rewind(LDB, BlkNo) ->
   CurBlk=ldb:read_key(LDB, <<"lastblock">>, <<0, 0, 0, 0, 0, 0, 0, 0>>),

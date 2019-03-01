@@ -182,6 +182,7 @@ handle_cast(prepare, #{mychain:=MyChain, inprocess:=InProc0, queue:=Queue} = Sta
   
   try
     LBH = get_lbh(State),
+    LastBlk=block:pack(blockchain:last_meta()),
     TxMap =
       lists:foldl(
         fun(Id, Acc) -> maps:put(Id, null, Acc) end,
@@ -194,6 +195,7 @@ handle_cast(prepare, #{mychain:=MyChain, inprocess:=InProc0, queue:=Queue} = Sta
         null=><<"mkblock">>,
         chain=>MyChain,
         lbh=>LBH,
+        lastblk=>LastBlk,
         txs=>TxMap
       }
     ),
